@@ -1660,3 +1660,471 @@ button { border: none; background: transparent; cursor: pointer; }
 @media (max-width: 680px) {
   .connections-grid { grid-template-columns: 1fr; }
 }
+
+/* ==========================================================================
+   TELA DE LOGIN / RECUPERAÇÃO / CADASTRO (CLEAN • PRETO & AMARELO)
+   ========================================================================== */
+.auth-screen {
+  position: fixed;
+  inset: 0;
+  background-color: var(--bg-canvas);
+  background-image:
+    radial-gradient(circle at 50% 0%, rgba(250, 204, 21, 0.1), transparent 52%),
+    radial-gradient(rgba(250, 204, 21, 0.05) 1px, transparent 1px);
+  background-size: 100% 100%, 26px 26px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  overflow-y: auto;
+  z-index: 50;
+}
+
+.auth-topbar {
+  position: fixed;
+  top: 18px;
+  right: 22px;
+  z-index: 55;
+}
+
+.theme-toggle-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-weight: 600;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  transition: all 0.15s ease;
+}
+
+.theme-toggle-pill:hover {
+  border-color: var(--yellow-400);
+  transform: translateY(-1px);
+}
+
+.auth-container {
+  width: 100%;
+  max-width: 400px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.auth-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  margin-bottom: 24px;
+}
+
+.brand-mark.lg {
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
+  margin-bottom: 12px;
+  box-shadow: 0 8px 26px rgba(250, 204, 21, 0.3);
+}
+
+.auth-brand h1 {
+  font-size: 26px;
+  font-weight: 500;
+  letter-spacing: -0.025em;
+  color: var(--text-primary);
+}
+
+.auth-brand h1 strong {
+  font-weight: 800;
+  color: var(--yellow-400);
+}
+
+.auth-subtitle {
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.auth-card {
+  width: 100%;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 26px 24px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.form-group label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.auth-input {
+  width: 100%;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 11px 13px;
+  font-size: 13.5px;
+  color: var(--text-primary);
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.auth-input:focus {
+  border-color: var(--yellow-400);
+  box-shadow: var(--yellow-glow);
+}
+
+.password-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.password-wrap .auth-input {
+  padding-right: 40px;
+}
+
+.pwd-eye-btn {
+  position: absolute;
+  right: 8px;
+  width: 30px;
+  height: 30px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+
+.pwd-eye-btn:hover {
+  color: var(--yellow-400);
+}
+
+.auth-helper {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 16px;
+}
+
+.auth-error {
+  background: rgba(239, 68, 68, 0.14);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  color: #f87171;
+  border-radius: var(--radius-sm);
+  padding: 9px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 14px;
+}
+
+.auth-submit {
+  padding: 11px 18px;
+  font-size: 14px;
+  margin-top: 4px;
+}
+
+.auth-footer-links {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.auth-link {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  transition: color 0.15s;
+}
+
+.auth-link:hover {
+  color: var(--yellow-400);
+  text-decoration: underline;
+}
+
+.auth-link.strong {
+  font-weight: 700;
+  color: var(--yellow-400);
+}
+
+.auth-sep {
+  color: var(--text-muted);
+}
+
+.auth-lgpd-foot {
+  margin-top: 22px;
+}
+
+.lgpd-trigger-link {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  padding: 6px 10px;
+  border-radius: var(--radius-pill);
+  transition: color 0.15s, background 0.15s;
+}
+
+.lgpd-trigger-link:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+/* ==========================================================================
+   MODAL LGPD (CONFORMIDADE LEI Nº 13.709/2018)
+   ========================================================================== */
+.lgpd-card {
+  width: 540px;
+  max-width: 94vw;
+  background: var(--bg-panel);
+  border: 1.5px solid var(--yellow-400);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 28px 70px rgba(0, 0, 0, 0.78);
+  overflow: hidden;
+  animation: fadeUp 0.18s ease-out;
+}
+
+.lgpd-head {
+  padding: 18px 22px 14px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.lgpd-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  background: var(--yellow-400);
+  color: #09090b;
+  padding: 3px 8px;
+  border-radius: 5px;
+  margin-bottom: 7px;
+}
+
+.lgpd-head h2 {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.lgpd-body {
+  padding: 18px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.lgpd-intro {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
+
+.lgpd-scroll-box {
+  background: var(--bg-canvas);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  max-height: 190px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.lgpd-clause h4 {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--yellow-400);
+  margin-bottom: 3px;
+}
+
+.lgpd-clause p {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.lgpd-check-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--text-primary);
+  line-height: 1.45;
+  transition: border-color 0.15s;
+}
+
+.lgpd-check-row:hover {
+  border-color: var(--border-yellow);
+}
+
+.lgpd-check-row.optional {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.lgpd-check-row input[type="checkbox"] {
+  width: 17px;
+  height: 17px;
+  margin-top: 2px;
+  accent-color: var(--yellow-400);
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.lgpd-check-row em {
+  font-style: normal;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.lgpd-foot {
+  padding: 14px 22px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.btn:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+  box-shadow: none !important;
+}
+
+/* ==========================================================================
+   MODO CLARO (TELA CLARA — BRANCO + PRETO + AMARELO DE ALTO CONTRASTE)
+   ========================================================================== */
+[data-theme="light"] {
+  --bg-canvas: #f4f5f7;
+  --bg-topbar: #111114;
+  --bg-panel: #ffffff;
+  --bg-card: #f8f9fb;
+  --bg-hover: #eff1f5;
+  --bg-active: #fefce8;
+
+  --border: #e4e6ec;
+  --border-strong: #d1d5df;
+  --border-yellow: rgba(202, 138, 4, 0.48);
+
+  --yellow-soft: rgba(250, 204, 21, 0.22);
+
+  --text-primary: #111114;
+  --text-secondary: #4b5563;
+  --text-muted: #71717a;
+  --text-on-yellow: #09090b;
+
+  --amber-note-bg: #fef9c3;
+}
+
+/* Manter barra superior preta elegante no modo claro (estilo Digisac • Preto & Amarelo) */
+[data-theme="light"] .topbar {
+  border-bottom-color: #22222a;
+}
+[data-theme="light"] .brand-title { color: #fafafa; }
+[data-theme="light"] .top-icon-btn { color: #a1a1ae; }
+[data-theme="light"] .top-icon-btn:hover { background: #1e1e26; color: #fafafa; }
+[data-theme="light"] .top-icon-btn.active { background: rgba(250, 204, 21, 0.16); color: #facc15; }
+[data-theme="light"] .topbar-divider { background: #26262f; }
+
+/* Ajustes finos de contraste do modo claro */
+[data-theme="light"] .chat-canvas {
+  background-color: #eef0f4;
+  background-image: radial-gradient(rgba(17, 17, 20, 0.06) 1px, transparent 1px);
+}
+
+[data-theme="light"] .msg-wrap.incoming .bubble {
+  background: #ffffff;
+  border-color: #e2e5ec;
+  color: #111114;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+}
+
+[data-theme="light"] .msg-wrap.incoming .bubble-sender,
+[data-theme="light"] .quote-author,
+[data-theme="light"] .kpi-num,
+[data-theme="light"] .u-tab.active,
+[data-theme="light"] .pill-tab.active,
+[data-theme="light"] .auth-link.strong,
+[data-theme="light"] .lgpd-clause h4,
+[data-theme="light"] .conn-action-link,
+[data-theme="light"] .popover-head,
+[data-theme="light"] .canned-code,
+[data-theme="light"] .contact-sub,
+[data-theme="light"] .readonly-pill,
+[data-theme="light"] .header-pill.agent,
+[data-theme="light"] .prompt-chip {
+  color: #a16207;
+}
+
+[data-theme="light"] .auth-brand h1 strong {
+  color: #ca8a04;
+}
+
+[data-theme="light"] .msg-wrap.private .bubble {
+  color: #713f12;
+  border-color: #eab308;
+}
+
+[data-theme="light"] .msg-wrap.private .bubble-sender {
+  color: #854d0e;
+}
+
+[data-theme="light"] .quote-box {
+  background: #f4f5f7;
+  color: #4b5563;
+}
+
+[data-theme="light"] .auth-card,
+[data-theme="light"] .lgpd-card,
+[data-theme="light"] .modal-card,
+[data-theme="light"] .command-card {
+  box-shadow: 0 20px 50px rgba(15, 23, 42, 0.14);
+}
+
+[data-theme="light"] .auth-error {
+  color: #b91c1c;
+}
+
+[data-theme="light"] .status-pill {
+  background: rgba(34, 197, 94, 0.14);
+  color: #15803d;
+}
+
+[data-theme="light"] .toast {
+  background: #ffffff;
+  color: #111114;
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.16);
+}
+
+[data-theme="light"] .cb-input-wrap { color: #a16207; }
+[data-theme="light"] .cb-input-wrap kbd { color: #a16207; }
+[data-theme="light"] .tag-btn.active { color: #854d0e; }
+[data-theme="light"] .badge-yellow { color: #854d0e; }
+[data-theme="light"] .tool-icon-btn.ai-spark { color: #ca8a04; }
+[data-theme="light"] .btn-resolve.reopen { color: #854d0e; }

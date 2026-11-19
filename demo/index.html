@@ -10,7 +10,107 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <div class="app-shell">
+  <!-- ========== TELA DE LOGIN / RECUPERAÇÃO / CADASTRO ========== -->
+  <div class="auth-screen" id="authScreen">
+    <div class="auth-topbar">
+      <button class="theme-toggle-pill" id="btnThemeToggleAuth" type="button" title="Alternar entre tela clara e tela escura">
+        <span class="theme-icon" id="themeIconAuth">☀️</span>
+        <span id="themeLabelAuth">Tela clara</span>
+      </button>
+    </div>
+
+    <div class="auth-container">
+      <div class="auth-brand">
+        <div class="brand-mark lg">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09Z" fill="#09090B"/>
+            <path d="M12 15l-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2Z" fill="#09090B"/>
+            <path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0" fill="#09090B"/>
+            <path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5" fill="#09090B"/>
+            <circle cx="15.5" cy="8.5" r="1.7" fill="#FACC15"/>
+          </svg>
+        </div>
+        <h1>SMV <strong>Sac</strong></h1>
+        <p class="auth-subtitle" id="authSubtitle">Acesse sua conta para gerenciar seus atendimentos</p>
+      </div>
+
+      <!-- Card Login -->
+      <div class="auth-card" id="authLoginCard">
+        <form id="loginForm" novalidate>
+          <div class="form-group">
+            <label for="loginEmail">E-mail</label>
+            <input type="email" id="loginEmail" class="auth-input" placeholder="ransay@supermegavendas.com" autocomplete="email" required />
+          </div>
+
+          <div class="form-group">
+            <label for="loginPassword">Senha</label>
+            <div class="password-wrap">
+              <input type="password" id="loginPassword" class="auth-input" placeholder="Digite sua senha" autocomplete="current-password" required />
+              <button type="button" class="pwd-eye-btn" id="btnToggleLoginPwd" title="Mostrar/ocultar senha" aria-label="Mostrar ou ocultar senha">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="auth-error hidden" id="loginError"></div>
+
+          <button type="submit" class="btn primary pill full auth-submit">Entrar</button>
+        </form>
+      </div>
+
+      <!-- Card Esqueci Minha Senha -->
+      <div class="auth-card hidden" id="authForgotCard">
+        <form id="forgotForm" novalidate>
+          <div class="form-group">
+            <label for="forgotEmail">E-mail cadastrado</label>
+            <input type="email" id="forgotEmail" class="auth-input" placeholder="seuemail@empresa.com.br" required />
+          </div>
+          <p class="auth-helper">Enviaremos um link seguro para você redefinir sua senha.</p>
+          <div class="auth-error hidden" id="forgotError"></div>
+          <button type="submit" class="btn primary pill full auth-submit">Enviar link de recuperação</button>
+        </form>
+      </div>
+
+      <!-- Card Cadastrar -->
+      <div class="auth-card hidden" id="authRegisterCard">
+        <form id="registerForm" novalidate>
+          <div class="form-group">
+            <label for="regName">Nome completo</label>
+            <input type="text" id="regName" class="auth-input" placeholder="Ex: Ransay Silva" required />
+          </div>
+          <div class="form-group">
+            <label for="regEmail">E-mail corporativo</label>
+            <input type="email" id="regEmail" class="auth-input" placeholder="voce@empresa.com.br" required />
+          </div>
+          <div class="form-group">
+            <label for="regPassword">Criar senha</label>
+            <input type="password" id="regPassword" class="auth-input" placeholder="Mínimo 4 caracteres" required />
+          </div>
+          <div class="auth-error hidden" id="registerError"></div>
+          <button type="submit" class="btn primary pill full auth-submit">Criar conta</button>
+        </form>
+      </div>
+
+      <!-- Opções abaixo da tela de login: Esqueci minha senha & Cadastrar -->
+      <div class="auth-footer-links" id="authLoginLinks">
+        <button type="button" class="auth-link" id="btnGoForgot">Esqueci minha senha</button>
+        <span class="auth-sep">•</span>
+        <button type="button" class="auth-link strong" id="btnGoRegister">Cadastrar</button>
+      </div>
+
+      <div class="auth-footer-links hidden" id="authBackLinks">
+        <button type="button" class="auth-link strong" id="btnBackToLogin">← Voltar para o login</button>
+      </div>
+
+      <div class="auth-lgpd-foot">
+        <button type="button" class="lgpd-trigger-link" id="btnOpenLgpdFromAuth">
+          🛡️ Termo de Privacidade e Conformidade LGPD
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div class="app-shell hidden" id="appShell">
     <!-- ========== BARRA SUPERIOR ÚNICA (ESTILO DIGISAC • PRETO & AMARELO) ========== -->
     <header class="topbar" aria-label="Navegação principal">
       <div class="topbar-brand" id="brandHomeBtn" title="SMV Sac — Ir para Conversas">
@@ -59,11 +159,19 @@
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
         </button>
 
+        <button class="top-icon-btn" id="btnThemeToggleTop" data-tip="Alternar tela clara/escura">
+          <span id="themeIconTop" style="font-size:16px;line-height:1;">☀️</span>
+        </button>
+
         <button class="agent-pill-btn" id="agentStatusToggle" title="Clique para alternar disponibilidade">
           <span class="avatar xs yellow-avatar">
-            LM
+            <span id="agentAvatarInitials">LM</span>
             <span class="status-dot online" id="agentStatusDot"></span>
           </span>
+        </button>
+
+        <button class="top-icon-btn" id="btnLogout" data-tip="Sair da conta">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
         </button>
       </nav>
     </header>
@@ -451,6 +559,59 @@
         <kbd>ESC</kbd>
       </div>
       <div class="cb-results" id="commandBarResults"></div>
+    </div>
+  </div>
+
+  <!-- ========== MODAL LGPD (LEI Nº 13.709/2018) ========== -->
+  <div class="modal-backdrop hidden" id="lgpdModal" role="dialog" aria-modal="true" aria-labelledby="lgpdTitle">
+    <div class="lgpd-card">
+      <div class="lgpd-head">
+        <div>
+          <span class="lgpd-badge">LGPD • LEI Nº 13.709/2018</span>
+          <h2 id="lgpdTitle">Termo de Uso e Proteção de Dados</h2>
+        </div>
+        <button type="button" class="icon-btn" id="btnCloseLgpd" title="Fechar">×</button>
+      </div>
+
+      <div class="lgpd-body">
+        <p class="lgpd-intro">
+          Para sua segurança e transparência, o <strong>SMV Sac</strong> trata seus dados pessoais em conformidade com a <strong>Lei Geral de Proteção de Dados (LGPD)</strong>. Leia o resumo abaixo antes de confirmar o acesso:
+        </p>
+
+        <div class="lgpd-scroll-box">
+          <div class="lgpd-clause">
+            <h4>1. Finalidade do Tratamento</h4>
+            <p>Coletamos apenas os dados necessários (nome, e-mail, registros de acesso e interações de atendimento) para autenticar seu usuário, operar os canais conectados e manter o histórico seguro de suporte.</p>
+          </div>
+          <div class="lgpd-clause">
+            <h4>2. Segurança e Armazenamento</h4>
+            <p>Os dados são protegidos com criptografia em trânsito, controle de acesso por perfil e mantidos somente pelo período necessário para execução do serviço e cumprimento de obrigações legais.</p>
+          </div>
+          <div class="lgpd-clause">
+            <h4>3. Direitos do Titular (Art. 18 da LGPD)</h4>
+            <p>Você pode solicitar a qualquer momento a confirmação, acesso, correção, portabilidade, eliminação de dados ou a revogação deste consentimento pelo canal do Encarregado (DPO): <strong>privacidade@smvsac.com.br</strong>.</p>
+          </div>
+        </div>
+
+        <label class="lgpd-check-row">
+          <input type="checkbox" id="lgpdAcceptRequired" />
+          <span>
+            <strong>Li e concordo</strong> com os Termos de Uso e a Política de Privacidade do SMV Sac, autorizando o tratamento dos meus dados pessoais conforme a LGPD. <em>(Obrigatório)</em>
+          </span>
+        </label>
+
+        <label class="lgpd-check-row optional">
+          <input type="checkbox" id="lgpdAcceptMarketing" />
+          <span>
+            Desejo receber avisos sobre melhorias e novidades da plataforma por e-mail. <em>(Opcional)</em>
+          </span>
+        </label>
+      </div>
+
+      <div class="lgpd-foot">
+        <button type="button" class="btn secondary pill" id="btnLgpdDecline">Recusar</button>
+        <button type="button" class="btn primary pill" id="btnLgpdConfirm" disabled>Aceitar e Confirmar</button>
+      </div>
     </div>
   </div>
 

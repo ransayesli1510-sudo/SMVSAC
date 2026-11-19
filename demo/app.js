@@ -6,6 +6,10 @@
   const DATA = window.SMV_SAC_DATA;
 
   const state = {
+    authenticated: false,
+    lgpdAccepted: false,
+    pendingUser: null,
+    theme: localStorage.getItem('smv_sac_theme') || 'dark',
     view: 'conversations', // conversations | connections | contacts | reports | ai
     tab: 'mine', // mine | queue | all
     statusFilter: 'open', // open | resolved | all
@@ -1021,18 +1025,277 @@
       if (e.target === $('#commandBarModal')) $('#commandBarModal').classList.add('hidden');
     });
 
+    // ======================================================================
+    // TEMA CLARO / ESCURO
+    // ======================================================================
+    $('#btnThemeToggleAuth').addEventListener('click', toggleTheme);
+    $('#btnThemeToggleTop').addEventListener('click', toggleTheme);
+
+    // ======================================================================
+    // LOGIN / ESQUECI MINHA SENHA / CADASTRAR / LGPD
+    // ======================================================================
+    $('#btnGoForgot').addEventListener('click', () => showAuthPanel('forgot'));
+    $('#btnGoRegister').addEventListener('click', () => showAuthPanel('register'));
+    $('#btnBackToLogin').addEventListener('click', () => showAuthPanel('login'));
+
+    $('#btnToggleLoginPwd').addEventListener('click', () => {
+      const inp = $('#loginPassword');
+      inp.type = inp.type === 'password' ? 'text' : 'password';
+    });
+
+    const ADMIN_ACCOUNT = {
+      name: 'Ransay',
+      email: 'ransay@supermegavendas.com',
+      password: '@Smv2025',
+      role: 'Admin',
+    };
+
+    function getRegisteredUsers() {
+      try {
+        const saved = JSON.parse(localStorage.getItem('smv_sac_users') || '[]');
+        return [ADMIN_ACCOUNT, ...(Array.isArray(saved) ? saved : [])];
+      } catch {
+        return [ADMIN_ACCOUNT];
+      }
+    }
+
+    function saveRegisteredUser(user) {
+      try {
+        const saved = JSON.parse(localStorage.getItem('smv_sac_users') || '[]');
+        const list = Array.isArray(saved) ? saved : [];
+        list.push(user);
+        localStorage.setItem('smv_sac_users', JSON.stringify(list));
+      } catch {
+        // fallback silencioso
+      }
+    }
+
+    $('#loginForm').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const email = $('#loginEmail').value.trim().toLowerCase();
+      const pwd = $('#loginPassword').value;
+      const err = $('#loginError');
+
+      if (!email || !email.includes('@')) {
+        err.textContent = 'Informe um e-mail válido para continuar.';
+        err.classList.remove('hidden');
+        return;
+      }
+      if (!pwd) {
+        err.textContent = 'Digite sua senha para continuar.';
+        err.classList.remove('hidden');
+        return;
+      }
+
+      const matched = getRegisteredUsers().find(
+        (u) => u.email.toLowerCase() === email && u.password === pwd
+      );
+
+      if (!matched) {
+        err.textContent = 'E-mail ou senha inválidos. Verifique suas credenciais.';
+        err.classList.remove('hidden');
+        return;
+      }
+
+      err.classList.add('hidden');
+      startAuthFlow({ name: matched.name, email: matched.email, role: matched.role || 'Agente' });
+    });
+
+    $('#forgotForm').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const email = $('#forgotEmail').value.trim();
+      const err = $('#forgotError');
+      if (!email || !email.includes('@')) {
+        err.textContent = 'Informe o e-mail cadastrado para receber o link.';
+        err.classList.remove('hidden');
+        return;
+      }
+      err.classList.add('hidden');
+      $('#forgotEmail').value = '';
+      showAuthPanel('login');
+      toast(`Link de recuperação enviado para ${email}`);
+    });
+
+    $('#registerForm').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const name = $('#regName').value.trim();
+      const email = $('#regEmail').value.trim().toLowerCase();
+      const pwd = $('#regPassword').value;
+      const err = $('#registerError');
+
+      if (!name || name.length < 2) {
+        err.textContent = 'Informe seu nome completo.';
+        err.classList.remove('hidden');
+        return;
+      }
+      if (!email || !email.includes('@')) {
+        err.textContent = 'Informe um e-mail válido.';
+        err.classList.remove('hidden');
+        return;
+      }
+      if (!pwd || pwd.length < 4) {
+        err.textContent = 'Crie uma senha com pelo menos 4 caracteres.';
+        err.classList.remove('hidden');
+        return;
+      }
+      if (getRegisteredUsers().some((u) => u.email.toLowerCase() === email)) {
+        err.textContent = 'Este e-mail já está cadastrado. Faça login para acessar.';
+        err.classList.remove('hidden');
+        return;
+      }
+      err.classList.add('hidden');
+      const newUser = { name, email, password: pwd, role: 'Agente', isNew: true };
+      saveRegisteredUser(newUser);
+      startAuthFlow(newUser);
+    });
+
+    // Modal LGPD
+    $('#btnOpenLgpdFromAuth').addEventListener('click', () => {
+      state.pendingUser = null;
+      openLgpdModal();
+    });
+
+    $('#lgpdAcceptRequired').addEventListener('change', (e) => {
+      $('#btnLgpdConfirm').disabled = !e.target.checked;
+    });
+
+    $('#btnLgpdConfirm').addEventListener('click', () => {
+      if (!$('#lgpdAcceptRequired').checked) return;
+      state.lgpdAccepted = true;
+      localStorage.setItem(
+        'smv_sac_lgpd_consent',
+        JSON.stringify({
+          accepted: true,
+          marketing: $('#lgpdAcceptMarketing').checked,
+          acceptedAt: new Date().toISOString(),
+        })
+      );
+      closeLgpdModal();
+      if (state.pendingUser) {
+        completeLogin(state.pendingUser);
+        state.pendingUser = null;
+      } else {
+        toast('Consentimento LGPD confirmado com sucesso!');
+      }
+    });
+
+    const handleLgpdDecline = () => {
+      const hadPending = Boolean(state.pendingUser);
+      state.pendingUser = null;
+      closeLgpdModal();
+      if (hadPending) {
+        toast('É necessário aceitar o termo LGPD para acessar o SMV Sac.');
+      }
+    };
+    $('#btnLgpdDecline').addEventListener('click', handleLgpdDecline);
+    $('#btnCloseLgpd').addEventListener('click', handleLgpdDecline);
+
+    // Logout
+    $('#btnLogout').addEventListener('click', () => {
+      state.authenticated = false;
+      state.lgpdAccepted = false;
+      $('#appShell').classList.add('hidden');
+      $('#liveWidgetModal').classList.add('hidden');
+      $('#authScreen').classList.remove('hidden');
+      showAuthPanel('login');
+      toast('Você saiu da sua conta SMV Sac.');
+    });
+
     document.addEventListener('keydown', (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k' && state.authenticated) {
         e.preventDefault();
         $('#btnOpenCommandBar').click();
       } else if (e.key === 'Escape') {
         $('#commandBarModal').classList.add('hidden');
         closeConnModal();
         hideCanned();
+        closeLgpdModal();
       }
     });
   }
 
+  // ========================================================================
+  // HELPERS: TEMA, AUTENTICAÇÃO E LGPD
+  // ========================================================================
+  function applyTheme(theme) {
+    state.theme = theme;
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('smv_sac_theme', theme);
+
+    const isLight = theme === 'light';
+    $('#themeIconAuth').textContent = isLight ? '🌙' : '☀️';
+    $('#themeLabelAuth').textContent = isLight ? 'Tela escura' : 'Tela clara';
+    $('#themeIconTop').textContent = isLight ? '🌙' : '☀️';
+    $('#btnThemeToggleTop').setAttribute('data-tip', isLight ? 'Mudar para tela escura' : 'Mudar para tela clara');
+  }
+
+  function toggleTheme() {
+    applyTheme(state.theme === 'dark' ? 'light' : 'dark');
+    toast(state.theme === 'light' ? '☀️ Modo tela clara ativado' : '🌙 Modo tela escura ativado');
+  }
+
+  function showAuthPanel(panel) {
+    $('#authLoginCard').classList.toggle('hidden', panel !== 'login');
+    $('#authForgotCard').classList.toggle('hidden', panel !== 'forgot');
+    $('#authRegisterCard').classList.toggle('hidden', panel !== 'register');
+    $('#authLoginLinks').classList.toggle('hidden', panel !== 'login');
+    $('#authBackLinks').classList.toggle('hidden', panel === 'login');
+
+    $('#loginError').classList.add('hidden');
+    $('#forgotError').classList.add('hidden');
+    $('#registerError').classList.add('hidden');
+
+    if (panel === 'login') {
+      $('#authSubtitle').textContent = 'Acesse sua conta para gerenciar seus atendimentos';
+    } else if (panel === 'forgot') {
+      $('#authSubtitle').textContent = 'Recuperação de acesso por e-mail';
+    } else {
+      $('#authSubtitle').textContent = 'Crie sua conta no SMV Sac em segundos';
+    }
+  }
+
+  function openLgpdModal() {
+    $('#lgpdAcceptRequired').checked = state.lgpdAccepted;
+    $('#btnLgpdConfirm').disabled = !state.lgpdAccepted;
+    $('#lgpdModal').classList.remove('hidden');
+  }
+
+  function closeLgpdModal() {
+    $('#lgpdModal').classList.add('hidden');
+  }
+
+  function startAuthFlow(user) {
+    if (state.lgpdAccepted) {
+      completeLogin(user);
+    } else {
+      state.pendingUser = user;
+      openLgpdModal();
+    }
+  }
+
+  function completeLogin(user) {
+    state.authenticated = true;
+    const parts = (user.name || 'LM').trim().split(/\s+/);
+    const initials = (parts[0]?.[0] || 'S') + (parts[1]?.[0] || parts[0]?.[1] || 'M');
+    DATA.currentAgent.name = user.name;
+    DATA.currentAgent.initials = initials.toUpperCase();
+    const selfAgent = DATA.agents.find((a) => a.id === DATA.currentAgent.id);
+    if (selfAgent) {
+      selfAgent.name = `${user.name} (${user.role === 'Admin' ? 'Admin' : 'Você'})`;
+    }
+    $('#agentAvatarInitials').textContent = DATA.currentAgent.initials;
+
+    $('#authScreen').classList.add('hidden');
+    $('#appShell').classList.remove('hidden');
+    setView('conversations');
+    toast(
+      user.isNew
+        ? `Conta criada! Bem-vindo ao SMV Sac, ${user.name}!`
+        : `Bem-vindo ao SMV Sac, ${user.name}${user.role === 'Admin' ? ' (Admin)' : ''}!`
+    );
+  }
+
   bindEvents();
+  applyTheme(state.theme);
   setView('conversations');
 })();
