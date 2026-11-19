@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SMV Sac — Atendimento Omnichannel</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- ========== BARRA SUPERIOR ÚNICA (ESTILO DIGISAC • PRETO & AMARELO) ========== -->
+    <header class="topbar" aria-label="Navegação principal">
+      <div class="topbar-brand" id="brandHomeBtn" title="SMV Sac — Ir para Conversas">
+        <div class="brand-mark">
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09Z" fill="#09090B"/>
+            <path d="M12 15l-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2Z" fill="#09090B"/>
+            <path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0" fill="#09090B"/>
+            <path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5" fill="#09090B"/>
+            <circle cx="15.5" cy="8.5" r="1.7" fill="#FACC15"/>
+          </svg>
+        </div>
+        <span class="brand-title">SMV <strong>Sac</strong></span>
+      </div>
+
+      <nav class="topbar-nav" aria-label="Módulos">
+        <button class="top-icon-btn active" data-view="conversations" data-tip="Conversas">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          <span class="top-badge" id="topUnreadBadge">0</span>
+        </button>
+
+        <button class="top-icon-btn" data-view="connections" data-tip="Conexões">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
+        </button>
+
+        <button class="top-icon-btn" data-view="contacts" data-tip="Contatos">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        </button>
+
+        <button class="top-icon-btn" data-view="reports" data-tip="Relatórios">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+        </button>
+
+        <button class="top-icon-btn" data-view="ai" data-tip="Assistente IA">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>
+          <span class="top-tag-new">IA</span>
+        </button>
+
+        <span class="topbar-divider"></span>
+
+        <button class="top-icon-btn" id="btnToggleLiveWidget" data-tip="Simular Widget do Cliente">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+        </button>
+
+        <button class="top-icon-btn" id="btnOpenCommandBar" data-tip="Busca rápida (Ctrl+K)">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+        </button>
+
+        <button class="agent-pill-btn" id="agentStatusToggle" title="Clique para alternar disponibilidade">
+          <span class="avatar xs yellow-avatar">
+            LM
+            <span class="status-dot online" id="agentStatusDot"></span>
+          </span>
+        </button>
+      </nav>
+    </header>
+
+    <!-- ========== ÁREA PRINCIPAL ========== -->
+    <main class="main-stage">
+      <!-- ==================== VIEW 1: CONVERSAS (LIMPA 2 COLUNAS) ==================== -->
+      <section class="view-panel active" id="view-conversations">
+        <!-- Coluna Lista de Conversas -->
+        <aside class="conv-sidebar">
+          <div class="conv-sidebar-head">
+            <div class="conv-head-top">
+              <h1>Conversas</h1>
+              <div class="conv-head-actions">
+                <button class="icon-btn" id="btnNewConversation" title="Simular nova conversa">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+                </button>
+                <select id="statusFilter" class="mini-select" title="Filtrar por status">
+                  <option value="open">Abertas</option>
+                  <option value="resolved">Finalizadas</option>
+                  <option value="all">Todas</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="pill-search">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+              <input type="text" id="convSearchInput" placeholder="Pesquisar por nome ou número..." />
+            </div>
+
+            <div class="pill-tabs" role="tablist">
+              <button class="pill-tab active" data-tab="mine" role="tab">
+                Minhas (<span id="countMine">0</span>)
+              </button>
+              <button class="pill-tab" data-tab="queue" role="tab">
+                Fila (<span id="countQueue">0</span>)
+              </button>
+              <button class="pill-tab" data-tab="all" role="tab">
+                Todas
+              </button>
+            </div>
+          </div>
+
+          <div class="conv-list" id="conversationList"></div>
+        </aside>
+
+        <!-- Área Principal da Conversa -->
+        <div class="chat-stage">
+          <header class="chat-bar">
+            <div class="chat-bar-left">
+              <div class="avatar md" id="chatAvatar"></div>
+              <div class="chat-bar-identity">
+                <span class="chat-bar-name" id="chatCustomerName">Selecione uma conversa</span>
+                <div class="chat-bar-pills" id="chatHeaderPills"></div>
+              </div>
+            </div>
+
+            <div class="chat-bar-actions">
+              <button class="icon-btn" id="btnSearchInChat" title="Buscar nesta conversa">
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+              </button>
+              <button class="icon-btn" id="btnTransferQuick" title="Assumir / Transferir atendimento">
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 2.1l4 4-4 4"/><path d="M3 12.2v-2a4 4 0 0 1 4-4h12.8M7 21.9l-4-4 4-4"/><path d="M21 11.8v2a4 4 0 0 1-4 4H4.2"/></svg>
+              </button>
+              <button class="icon-btn" id="btnToggleDrawer" title="Detalhes do contato e IA">
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+              </button>
+              <button class="btn-resolve" id="btnResolveToggle" title="Finalizar / Reabrir chamado">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+                <span>Finalizar</span>
+              </button>
+            </div>
+          </header>
+
+          <!-- Busca inline opcional dentro da conversa -->
+          <div class="chat-inline-search hidden" id="chatInlineSearch">
+            <input type="text" id="inChatSearchInput" placeholder="Filtrar mensagens desta conversa..." />
+            <button class="icon-btn" id="btnCloseInChatSearch" title="Fechar">×</button>
+          </div>
+
+          <!-- Fluxo de Mensagens -->
+          <div class="chat-canvas" id="chatMessages"></div>
+
+          <div class="typing-bar hidden" id="typingIndicator">
+            <span class="typing-dots"><i></i><i></i><i></i></span>
+            <span id="typingText">Digitando...</span>
+          </div>
+
+          <!-- Barra de Envio Minimalista (Estilo Digisac) -->
+          <div class="composer-bar" id="composerBar">
+            <!-- Popover Respostas Prontas (/) -->
+            <div class="floating-popover hidden" id="cannedPopover">
+              <div class="popover-head">
+                <span>⚡ Respostas Rápidas</span>
+                <span class="muted">Clique para inserir</span>
+              </div>
+              <div class="popover-list" id="cannedList"></div>
+            </div>
+
+            <div class="composer-left-tools">
+              <button class="tool-icon-btn" id="btnCannedTrigger" title="Respostas rápidas (ou digite /)">
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+              </button>
+              <button class="tool-icon-btn" id="btnTogglePrivate" title="Alternar Nota Interna (visível só para equipe)">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+              </button>
+              <button class="tool-icon-btn ai-spark" id="btnAiDraft" title="Sugerir resposta com IA">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>
+              </button>
+            </div>
+
+            <div class="composer-input-box">
+              <span class="private-tag hidden" id="privateModeTag">Nota interna</span>
+              <textarea
+                id="composerInput"
+                rows="1"
+                placeholder="Digite uma mensagem (ou '/' para respostas rápidas)..."
+              ></textarea>
+            </div>
+
+            <button class="send-circle-btn" id="btnSendMessage" title="Enviar mensagem (Enter)">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- Drawer Lateral de Detalhes (Oculto por padrão para tela limpa!) -->
+        <aside class="details-drawer hidden" id="detailsDrawer">
+          <div class="drawer-head">
+            <h3>Detalhes</h3>
+            <button class="icon-btn" id="btnCloseDrawer" title="Fechar painel">×</button>
+          </div>
+
+          <div class="drawer-body">
+            <div class="contact-card" id="contactProfileBox"></div>
+
+            <div class="drawer-section">
+              <label>Atendente</label>
+              <select id="selectAgent" class="field-select"></select>
+
+              <label>Departamento</label>
+              <select id="selectDept" class="field-select"></select>
+
+              <label>Conexão</label>
+              <div class="readonly-pill" id="detailConnection"></div>
+
+              <label>Etiquetas</label>
+              <div class="tags-wrap" id="labelsEditor"></div>
+            </div>
+
+            <div class="drawer-section">
+              <label>✨ Resumo Rápido (IA)</label>
+              <div class="ai-summary-box" id="aiSummaryBox"></div>
+              <button class="btn secondary full" id="btnDrawerAiReply">Usar resposta sugerida</button>
+            </div>
+          </div>
+        </aside>
+      </section>
+
+      <!-- ==================== VIEW 2: CONEXÕES (ESTILO DIGISAC) ==================== -->
+      <section class="view-panel" id="view-connections">
+        <div class="centered-page">
+          <div class="connections-top">
+            <h1>Conexões</h1>
+            <div class="connections-controls">
+              <div class="pill-search wide">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                <input type="text" id="connSearchInput" placeholder="Pesquisar por nome" />
+              </div>
+              <select id="connChannelFilter" class="pill-filter-select">
+                <option value="all">Filtros: Todos</option>
+                <option value="WhatsApp">WhatsApp</option>
+                <option value="WebChat">WebChat</option>
+                <option value="Instagram">Instagram</option>
+              </select>
+              <button class="btn primary pill" id="btnAddConnection">+ Adicionar</button>
+            </div>
+          </div>
+
+          <div class="underline-tabs">
+            <button class="u-tab active" data-conn-tab="active">
+              Ativas <span class="u-count" id="connActiveCount">0</span>
+            </button>
+            <button class="u-tab" data-conn-tab="archived">
+              Arquivadas <span class="u-count" id="connArchivedCount">0</span>
+            </button>
+          </div>
+
+          <div class="connections-grid" id="connectionsGrid"></div>
+
+          <div class="connections-footer">
+            <span id="connFooterCount">Mostrando 0 de 0 resultados</span>
+            <div class="pagination-simple">
+              <span>Página 1 de 1</span>
+              <button class="pg-btn" disabled>‹</button>
+              <button class="pg-btn" disabled>›</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ==================== VIEW 3: CONTATOS ==================== -->
+      <section class="view-panel" id="view-contacts">
+        <div class="centered-page">
+          <div class="connections-top">
+            <h1>Contatos</h1>
+            <div class="connections-controls">
+              <div class="pill-search wide">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                <input type="text" id="contactsSearchInput" placeholder="Pesquisar contato, empresa ou telefone..." />
+              </div>
+            </div>
+          </div>
+
+          <div class="clean-table-card">
+            <table class="clean-table">
+              <thead>
+                <tr>
+                  <th>Contato</th>
+                  <th>Telefone / E-mail</th>
+                  <th>Conexão</th>
+                  <th>Departamento</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="contactsTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ==================== VIEW 4: RELATÓRIOS ==================== -->
+      <section class="view-panel" id="view-reports">
+        <div class="centered-page">
+          <div class="connections-top">
+            <h1>Relatórios</h1>
+            <div class="connections-controls">
+              <div class="segmented" id="reportPeriodGroup">
+                <button class="seg-btn active" data-period="7d">7 dias</button>
+                <button class="seg-btn" data-period="30d">30 dias</button>
+              </div>
+              <button class="btn secondary pill" id="btnExportReport">Exportar CSV</button>
+            </div>
+          </div>
+
+          <div class="kpi-row" id="reportsKpiGrid"></div>
+
+          <div class="reports-two-col">
+            <div class="clean-card">
+              <div class="card-head">
+                <h3>Atendimentos no período</h3>
+                <div class="legend-inline">
+                  <span><i class="dot-y"></i> Recebidos</span>
+                  <span><i class="dot-g"></i> Finalizados</span>
+                </div>
+              </div>
+              <div class="chart-wrap" id="volumeChart"></div>
+            </div>
+
+            <div class="clean-card">
+              <div class="card-head">
+                <h3>Por Conexão</h3>
+              </div>
+              <div class="bars-stack" id="channelDistribution"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ==================== VIEW 5: ASSISTENTE IA ==================== -->
+      <section class="view-panel" id="view-ai">
+        <div class="centered-page">
+          <div class="connections-top">
+            <h1>Assistente IA</h1>
+            <label class="toggle-pill">
+              <input type="checkbox" id="toggleAiAuto" checked />
+              <span class="toggle-track"></span>
+              <span id="aiAutoLabel">Triagem automática ativa</span>
+            </label>
+          </div>
+
+          <div class="kpi-row three">
+            <div class="kpi-box accent">
+              <span class="kpi-label">Resolução Automática</span>
+              <strong class="kpi-num">68%</strong>
+            </div>
+            <div class="kpi-box">
+              <span class="kpi-label">Tempo de Resposta</span>
+              <strong class="kpi-num">1,8s</strong>
+            </div>
+            <div class="kpi-box">
+              <span class="kpi-label">Satisfação (CSAT)</span>
+              <strong class="kpi-num">4,9 ★</strong>
+            </div>
+          </div>
+
+          <div class="clean-card">
+            <div class="card-head">
+              <h3>Testar atendimento automático</h3>
+              <span class="badge-yellow">Sandbox</span>
+            </div>
+            <div class="quick-prompts">
+              <button class="prompt-chip" data-q="Qual o horário de atendimento e como falar com o suporte?">Horário / Suporte</button>
+              <button class="prompt-chip" data-q="Preciso da 2ª via do boleto ou chave PIX">2ª via / PIX</button>
+              <button class="prompt-chip" data-q="Quero falar com um atendente sobre meu contrato">Transferir para humano</button>
+            </div>
+            <div class="ai-sandbox-log" id="aiSandboxLog">
+              <div class="empty-hint">Clique em um cenário acima ou digite uma dúvida para testar a IA do SMV Sac.</div>
+            </div>
+            <div class="sandbox-input-row">
+              <input type="text" id="aiSandboxInput" placeholder="Digite como se fosse um cliente..." />
+              <button class="btn primary pill" id="btnAiSandboxSend">Testar</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- ========== MODAL ADICIONAR CONEXÃO ========== -->
+  <div class="modal-backdrop hidden" id="addConnModal">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3>Nova Conexão</h3>
+        <button class="icon-btn" id="btnCloseAddConn">×</button>
+      </div>
+      <div class="modal-body">
+        <label>Nome da conexão</label>
+        <input type="text" id="newConnName" class="field-input" placeholder="Ex: Comercial Matriz" />
+        <label>Canal</label>
+        <select id="newConnChannel" class="field-select">
+          <option value="WhatsApp">WhatsApp</option>
+          <option value="WebChat">WebChat</option>
+          <option value="Instagram">Instagram</option>
+        </select>
+        <label>Número ou identificador</label>
+        <input type="text" id="newConnIdentifier" class="field-input" placeholder="Ex: +55 11 99999-0000" />
+        <label>Departamento padrão</label>
+        <select id="newConnDept" class="field-select">
+          <option value="Suporte">Suporte</option>
+          <option value="Vendas">Vendas</option>
+          <option value="Financeiro">Financeiro</option>
+        </select>
+      </div>
+      <div class="modal-foot">
+        <button class="btn secondary pill" id="btnCancelAddConn">Cancelar</button>
+        <button class="btn primary pill" id="btnSaveAddConn">Salvar conexão</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== SIMULADOR DO WIDGET DO CLIENTE ========== -->
+  <div class="live-widget hidden" id="liveWidgetModal">
+    <div class="lw-header">
+      <div class="lw-brand">
+        <div class="lw-logo">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none">
+            <path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09Z" fill="#FACC15"/>
+            <path d="M12 15l-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2Z" fill="#FACC15"/>
+            <path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0" fill="#FACC15"/>
+            <path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5" fill="#FACC15"/>
+            <circle cx="15.5" cy="8.5" r="1.7" fill="#09090B"/>
+          </svg>
+        </div>
+        <div>
+          <div class="lw-title">SMV Sac • WebChat</div>
+          <div class="lw-sub">Online agora</div>
+        </div>
+      </div>
+      <button class="lw-close" id="btnCloseLiveWidget">×</button>
+    </div>
+    <div class="lw-messages" id="lwMessages"></div>
+    <div class="lw-input-row">
+      <input type="text" id="lwInput" placeholder="Escreva como cliente do site..." />
+      <button class="lw-send" id="btnLwSend">➤</button>
+    </div>
+  </div>
+
+  <!-- ========== BUSCA RÁPIDA (CTRL + K) ========== -->
+  <div class="modal-backdrop hidden" id="commandBarModal">
+    <div class="command-card">
+      <div class="cb-input-wrap">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+        <input type="text" id="commandBarInput" placeholder="Ir para conversa, conexões ou ação..." />
+        <kbd>ESC</kbd>
+      </div>
+      <div class="cb-results" id="commandBarResults"></div>
+    </div>
+  </div>
+
+  <!-- ========== TOASTS ========== -->
+  <div class="toast-stack" id="toastStack"></div>
+
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
