@@ -1,0 +1,572 @@
+// =============================================================================
+// SMV SAC — SCHEMA PRISMA (SUPABASE POSTGRESQL + PG_TRGM + PGVECTOR)
+// =============================================================================
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL") // Connection Pooler (porta 6543, pgbouncer=true)
+  directUrl  = env("DIRECT_URL")   // Conexão direta (porta 5432) para migrations
+  extensions = [pg_trgm(schema: "extensions"), vector(schema: "extensions")]
+}
+
+// =============================================================================
+// ENUMS
+// =============================================================================
+
+enum UserRole {
+  ADMIN
+  SUPERVISOR
+  AGENT
+}
+
+enum AgentAvailability {
+  ONLINE
+  BUSY
+  OFFLINE
+}
+
+enum LgpdSubjectType {
+  USER
+  CONTACT
+}
+
+enum AutoAssignRule {
+  MANUAL
+  ROUND_ROBIN
+  LEAST_BUSY
+}
+
+enum ChannelType {
+  WHATSAPP
+  WEBCHAT
+  INSTAGRAM
+}
+
+enum ConnectionProvider {
+  META_CLOUD
+  EVOLUTION
+  BAILEYS
+  WIDGET
+}
+
+enum ConnectionStatus {
+  ACTIVE
+  DISCONNECTED
+  ARCHIVED
+}
+
+enum ConversationStatus {
+  OPEN
+  PENDING
+  RESOLVED
+}
+
+enum MessageDirection {
+  INCOMING
+  OUTGOING
+}
+
+enum MessageVisibility {
+  PUBLIC
+  PRIVATE_NOTE
+}
+
+enum MessageSenderType {
+  CONTACT
+  AGENT
+  BOT
+  SYSTEM
+}
+
+enum MessageContentType {
+  TEXT
+  IMAGE
+  AUDIO
+  VIDEO
+  DOCUMENT
+  TEMPLATE
+  LOCATION
+}
+
+enum MessageDeliveryStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+enum ConversationEventType {
+  CREATED
+  ASSIGNED
+  UNASSIGNED
+  TRANSFERRED_AGENT
+  TRANSFERRED_DEPARTMENT
+  RESOLVED
+  REOPENED
+  LABEL_ADDED
+  LABEL_REMOVED
+  BOT_HANDOFF
+}
+
+enum AiInteractionKind {
+  AUTO_REPLY
+  SUMMARY
+  DRAFT
+  SANDBOX
+}
+
+// =============================================================================
+// 1. MULTI-TENANCY, IDENTIDADE, ACESSO E LGPD
+// =============================================================================
+
+model Organization {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  slug      String   @unique
+  plan      String   @default("pro")
+  settings  Json     @default("{}")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  users           User[]
+  lgpdConsents    LgpdConsent[]
+  departments     Department[]
+  labels          Label[]
+  cannedResponses CannedResponse[]
+  connections     Connection[]
+  contacts        Contact[]
+  conversations   Conversation[]
+  aiAgents        AiAgent[]
+  aiInteractions  AiInteraction[]
+  dailyMetrics    DailyMetric[]
+
+  @@map("organizations")
+}
+
+model User {
+  id             String            @id @default(uuid()) @db.Uuid
+  organizationId String            @map("organization_id") @db.Uuid
+  name           String
+  email          String            @unique
+  passwordHash   String            @map("password_hash")
+  role           UserRole          @default(AGENT)
+  availability   AgentAvailability @default(OFFLINE)
+  avatarBucket   String?           @map("avatar_bucket")
+  avatarPath     String?           @map("avatar_path") // Caminho no Supabase Storage
+  avatarUrl      String?           @map("avatar_url")
+  isActive       Boolean           @default(true) @map("is_active")
+  lastSeenAt     DateTime?         @map("last_seen_at") @db.Timestamptz(6)
+  createdAt      DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime          @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization          Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  passwordResets        PasswordReset[]
+  departments           DepartmentUser[]
+  assignedConversations Conversation[]      @relation("ConversationAssignee")
+  sentMessages          Message[]           @relation("MessageSenderUser")
+  conversationEvents    ConversationEvent[] @relation("EventActorUser")
+
+  @@index([organizationId, isActive])
+  @@index([organizationId, availability])
+  @@map("users")
+}
+
+model PasswordReset {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(6)
+  usedAt    DateTime? @map("used_at") @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@map("password_resets")
+}
+
+/// Registro auditável (append-only) de consentimentos conforme Lei nº 13.709/2018 (LGPD)
+model LgpdConsent {
+  id                String          @id @default(uuid()) @db.Uuid
+  organizationId    String          @map("organization_id") @db.Uuid
+  subjectType       LgpdSubjectType @map("subject_type")
+  subjectId         String          @map("subject_id") @db.Uuid
+  termVersion       String          @map("term_version")
+  acceptedRequired  Boolean         @map("accepted_required")
+  acceptedMarketing Boolean         @default(false) @map("accepted_marketing")
+  ipAddress         String?         @map("ip_address")
+  userAgent         String?         @map("user_agent")
+  acceptedAt        DateTime        @default(now()) @map("accepted_at") @db.Timestamptz(6)
+  revokedAt         DateTime?       @map("revoked_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, subjectType, subjectId, acceptedAt(sort: Desc)])
+  @@map("lgpd_consents")
+}
+
+// =============================================================================
+// 2. DEPARTAMENTOS, ETIQUETAS E RESPOSTAS RÁPIDAS
+// =============================================================================
+
+model Department {
+  id             String         @id @default(uuid()) @db.Uuid
+  organizationId String         @map("organization_id") @db.Uuid
+  name           String
+  businessHours  Json           @default("{}") @map("business_hours")
+  autoAssignRule AutoAssignRule @default(MANUAL) @map("auto_assign_rule")
+  isActive       Boolean        @default(true) @map("is_active")
+  createdAt      DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization       Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  users              DepartmentUser[]
+  cannedResponses    CannedResponse[]
+  defaultConnections Connection[]     @relation("ConnectionDefaultDepartment")
+  conversations      Conversation[]
+  dailyMetrics       DailyMetric[]
+
+  @@unique([organizationId, name])
+  @@map("departments")
+}
+
+model DepartmentUser {
+  departmentId String   @map("department_id") @db.Uuid
+  userId       String   @map("user_id") @db.Uuid
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([departmentId, userId])
+  @@index([userId])
+  @@map("department_users")
+}
+
+model Label {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  name           String
+  color          String   @default("#FACC15")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization  Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  conversations ConversationLabel[]
+
+  @@unique([organizationId, name])
+  @@map("labels")
+}
+
+model CannedResponse {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  departmentId   String?  @map("department_id") @db.Uuid
+  shortcode      String   // Ex.: /ola, /acesso, /pix, /encerrar
+  title          String
+  content        String
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  department   Department?  @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+
+  @@unique([organizationId, shortcode])
+  @@index([organizationId, departmentId])
+  @@map("canned_responses")
+}
+
+// =============================================================================
+// 3. CONEXÕES OMNICHANNEL E CONTATOS
+// =============================================================================
+
+model Connection {
+  id                   String             @id @default(uuid()) @db.Uuid
+  organizationId       String             @map("organization_id") @db.Uuid
+  name                 String
+  channel              ChannelType
+  provider             ConnectionProvider @default(META_CLOUD)
+  identifier           String             // Ex.: +55 11 91773-5588, @smvsac.oficial, WebChat Site
+  credentialsEncrypted String?            @map("credentials_encrypted") // Criptografado AES-256-GCM
+  webhookSecret        String?            @map("webhook_secret")
+  defaultDepartmentId  String?            @map("default_department_id") @db.Uuid
+  aiAgentId            String?            @map("ai_agent_id") @db.Uuid
+  status               ConnectionStatus   @default(ACTIVE)
+  metadata             Json               @default("{}")
+  createdAt            DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization      Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  defaultDepartment Department?       @relation("ConnectionDefaultDepartment", fields: [defaultDepartmentId], references: [id], onDelete: SetNull)
+  aiAgent           AiAgent?          @relation(fields: [aiAgentId], references: [id], onDelete: SetNull)
+  contactIdentities ContactIdentity[]
+  conversations     Conversation[]
+  dailyMetrics      DailyMetric[]
+
+  @@index([organizationId, status, channel])
+  @@map("connections")
+}
+
+model Contact {
+  id               String   @id @default(uuid()) @db.Uuid
+  organizationId   String   @map("organization_id") @db.Uuid
+  name             String
+  company          String?
+  roleTitle        String?  @map("role_title")
+  phoneE164        String?  @map("phone_e164")
+  email            String?
+  avatarBucket     String?  @map("avatar_bucket")
+  avatarPath       String?  @map("avatar_path") // Caminho no Supabase Storage
+  avatarUrl        String?  @map("avatar_url")
+  customAttributes Json     @default("{}") @map("custom_attributes")
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization  Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  identities    ContactIdentity[]
+  conversations Conversation[]
+
+  @@index([organizationId, phoneE164])
+  @@index([organizationId, email])
+  @@index([organizationId, name])
+  @@map("contacts")
+}
+
+/// Unifica o mesmo contato em múltiplos canais (WhatsApp, WebChat, Instagram)
+model ContactIdentity {
+  id                String   @id @default(uuid()) @db.Uuid
+  contactId         String   @map("contact_id") @db.Uuid
+  connectionId      String   @map("connection_id") @db.Uuid
+  externalContactId String   @map("external_contact_id") // wa_id, ig_scoped_id, session_id
+  metadata          Json     @default("{}")
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  contact    Contact    @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  connection Connection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@unique([connectionId, externalContactId])
+  @@index([contactId])
+  @@map("contact_identities")
+}
+
+// =============================================================================
+// 4. CONVERSAS, MENSAGENS, ANEXOS (SUPABASE STORAGE) E EVENTOS
+// =============================================================================
+
+model Conversation {
+  id                   String             @id @default(uuid()) @db.Uuid
+  protocolNumber       Int                @unique @default(autoincrement()) @map("protocol_number")
+  organizationId       String             @map("organization_id") @db.Uuid
+  connectionId         String             @map("connection_id") @db.Uuid
+  contactId            String             @map("contact_id") @db.Uuid
+  departmentId         String?            @map("department_id") @db.Uuid
+  assigneeId           String?            @map("assignee_id") @db.Uuid // NULL = aguardando na Fila
+  status               ConversationStatus @default(OPEN)
+  unreadCount          Int                @default(0) @map("unread_count")
+  aiSummary            String?            @map("ai_summary")
+  aiSuggestedReply     String?            @map("ai_suggested_reply")
+  firstResponseAt      DateTime?          @map("first_response_at") @db.Timestamptz(6)
+  firstResponseSeconds Int?               @map("first_response_seconds")
+  resolvedAt           DateTime?          @map("resolved_at") @db.Timestamptz(6)
+  resolutionSeconds    Int?               @map("resolution_seconds")
+  resolvedByAi         Boolean            @default(false) @map("resolved_by_ai")
+  csatScore            Int?               @map("csat_score") // 1..5
+  csatComment          String?            @map("csat_comment")
+  lastMessageAt        DateTime           @default(now()) @map("last_message_at") @db.Timestamptz(6)
+  createdAt            DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization   Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  connection     Connection          @relation(fields: [connectionId], references: [id], onDelete: Restrict)
+  contact        Contact             @relation(fields: [contactId], references: [id], onDelete: Restrict)
+  department     Department?         @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  assignee       User?               @relation("ConversationAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  labels         ConversationLabel[]
+  messages       Message[]
+  events         ConversationEvent[]
+  aiInteractions AiInteraction[]
+
+  // Índices críticos para listagem de conversas (Minhas / Fila / Todas) e relatórios
+  @@index([organizationId, status, assigneeId, lastMessageAt(sort: Desc)])
+  @@index([organizationId, connectionId, status, lastMessageAt(sort: Desc)])
+  @@index([organizationId, departmentId, status, lastMessageAt(sort: Desc)])
+  @@index([organizationId, contactId, createdAt(sort: Desc)])
+  @@map("conversations")
+}
+
+model ConversationLabel {
+  conversationId String   @map("conversation_id") @db.Uuid
+  labelId        String   @map("label_id") @db.Uuid
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  label        Label        @relation(fields: [labelId], references: [id], onDelete: Cascade)
+
+  @@id([conversationId, labelId])
+  @@index([labelId])
+  @@map("conversation_labels")
+}
+
+model Message {
+  id              String                @id @default(uuid()) @db.Uuid
+  conversationId  String                @map("conversation_id") @db.Uuid
+  externalId      String?               @map("external_id") // Idempotência de webhooks (Meta/WhatsApp/IG)
+  direction       MessageDirection
+  visibility      MessageVisibility     @default(PUBLIC)
+  senderType      MessageSenderType     @map("sender_type")
+  senderUserId    String?               @map("sender_user_id") @db.Uuid
+  senderName      String?               @map("sender_name")
+  content         String
+  contentType     MessageContentType    @default(TEXT) @map("content_type")
+  quotedMessageId String?               @map("quoted_message_id") @db.Uuid
+  deliveryStatus  MessageDeliveryStatus @default(SENT) @map("delivery_status")
+  metadata        Json                  @default("{}")
+  createdAt       DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  conversation  Conversation        @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderUser    User?               @relation("MessageSenderUser", fields: [senderUserId], references: [id], onDelete: SetNull)
+  quotedMessage Message?            @relation("QuotedMessage", fields: [quotedMessageId], references: [id], onDelete: SetNull)
+  quotedBy      Message[]           @relation("QuotedMessage")
+  attachments   MessageAttachment[]
+
+  // No PostgreSQL, NULLs são distintos em UNIQUE: permite múltiplas mensagens sem externalId e garante idempotência quando presente
+  @@unique([conversationId, externalId])
+  @@index([conversationId, createdAt(sort: Desc)])
+  @@index([conversationId, visibility, createdAt(sort: Desc)])
+  @@map("messages")
+}
+
+/// Anexos armazenados no Supabase Storage (imagens, áudios, boletos, PDFs)
+model MessageAttachment {
+  id            String   @id @default(uuid()) @db.Uuid
+  messageId     String   @map("message_id") @db.Uuid
+  storageBucket String   @map("storage_bucket")
+  storagePath   String   @map("storage_path") // Ex.: {orgId}/{conversationId}/{uuid}.pdf
+  publicUrl     String?  @map("public_url")
+  fileName      String   @map("file_name")
+  mimeType      String   @map("mime_type")
+  sizeBytes     Int      @map("size_bytes")
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
+  @@map("message_attachments")
+}
+
+model ConversationEvent {
+  id             String                @id @default(uuid()) @db.Uuid
+  conversationId String                @map("conversation_id") @db.Uuid
+  actorType      MessageSenderType     @map("actor_type")
+  actorUserId    String?               @map("actor_user_id") @db.Uuid
+  eventType      ConversationEventType @map("event_type")
+  payload        Json                  @default("{}")
+  createdAt      DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  actorUser    User?        @relation("EventActorUser", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([conversationId, createdAt(sort: Desc)])
+  @@map("conversation_events")
+}
+
+// =============================================================================
+// 5. ASSISTENTE IA (RAG COM PGVECTOR) E TELEMETRIA
+// =============================================================================
+
+model AiAgent {
+  id                String   @id @default(uuid()) @db.Uuid
+  organizationId    String   @map("organization_id") @db.Uuid
+  name              String
+  autoTriageEnabled Boolean  @default(true) @map("auto_triage_enabled")
+  systemPrompt      String   @map("system_prompt")
+  handoffRules      Json     @default("{}") @map("handoff_rules")
+  modelName         String   @default("gpt-4o-mini") @map("model_name")
+  temperature       Float    @default(0.3)
+  isActive          Boolean  @default(true) @map("is_active")
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization    Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  connections     Connection[]
+  knowledgeChunks AiKnowledgeChunk[]
+  interactions    AiInteraction[]
+
+  @@index([organizationId, isActive])
+  @@map("ai_agents")
+}
+
+/// Base de conhecimento vetorial (pgvector) para o Assistente IA e Sandbox
+model AiKnowledgeChunk {
+  id        String                      @id @default(uuid()) @db.Uuid
+  aiAgentId String                      @map("ai_agent_id") @db.Uuid
+  title     String
+  content   String
+  embedding Unsupported("extensions.vector(1536)")? // Compatível com text-embedding-3-small (1536 dims) no schema extensions do Supabase
+  metadata  Json                        @default("{}")
+  createdAt DateTime                    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime                    @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  aiAgent AiAgent @relation(fields: [aiAgentId], references: [id], onDelete: Cascade)
+
+  @@index([aiAgentId])
+  @@map("ai_knowledge_chunks")
+}
+
+model AiInteraction {
+  id                    String            @id @default(uuid()) @db.Uuid
+  organizationId        String            @map("organization_id") @db.Uuid
+  aiAgentId             String?           @map("ai_agent_id") @db.Uuid
+  conversationId        String?           @map("conversation_id") @db.Uuid
+  kind                  AiInteractionKind
+  inputText             String            @map("input_text")
+  outputText            String            @map("output_text")
+  latencyMs             Int               @map("latency_ms")
+  resolvedWithoutHuman  Boolean           @default(false) @map("resolved_without_human")
+  handoffTriggered      Boolean           @default(false) @map("handoff_triggered")
+  createdAt             DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  aiAgent      AiAgent?      @relation(fields: [aiAgentId], references: [id], onDelete: SetNull)
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, kind, createdAt(sort: Desc)])
+  @@index([conversationId, createdAt(sort: Desc)])
+  @@map("ai_interactions")
+}
+
+// =============================================================================
+// 6. RELATÓRIOS E MÉTRICAS AGREGADAS (7D / 30D / CSV)
+// =============================================================================
+
+model DailyMetric {
+  id                    String   @id @default(uuid()) @db.Uuid
+  organizationId        String   @map("organization_id") @db.Uuid
+  metricDate            DateTime @map("metric_date") @db.Date
+  /// Chave composta normalizada (ex.: "{connId|all}:{deptId|all}") para upsert seguro com FKs nulas
+  dimensionKey          String   @map("dimension_key")
+  connectionId          String?  @map("connection_id") @db.Uuid
+  departmentId          String?  @map("department_id") @db.Uuid
+  receivedCount         Int      @default(0) @map("received_count")
+  resolvedCount         Int      @default(0) @map("resolved_count")
+  aiResolvedCount       Int      @default(0) @map("ai_resolved_count")
+  firstResponseSumSec   Int      @default(0) @map("first_response_sum_sec")
+  firstResponseSamples  Int      @default(0) @map("first_response_samples")
+  csatSum               Int      @default(0) @map("csat_sum")
+  csatCount             Int      @default(0) @map("csat_count")
+  updatedAt             DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  connection   Connection?  @relation(fields: [connectionId], references: [id], onDelete: SetNull)
+  department   Department?  @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+
+  @@unique([organizationId, metricDate, dimensionKey])
+  @@index([organizationId, metricDate(sort: Desc)])
+  @@index([organizationId, connectionId, metricDate(sort: Desc)])
+  @@map("daily_metrics")
+}
