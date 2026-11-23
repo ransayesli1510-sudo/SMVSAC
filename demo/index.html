@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=20261123-11" />
+  <link rel="stylesheet" href="styles.css?v=20261123-12" />
 </head>
 <body>
   <!-- ========== TELA DE LOGIN / RECUPERAÇÃO / CADASTRO ========== -->
@@ -39,7 +39,7 @@
         <form id="loginForm" novalidate>
           <div class="form-group">
             <label for="loginEmail">E-mail</label>
-            <input type="email" id="loginEmail" class="auth-input" placeholder="ransay@supermegavendas.com" autocomplete="email" required />
+            <input type="email" id="loginEmail" class="auth-input" placeholder="E-mail" autocomplete="email" required />
           </div>
 
           <div class="form-group">
@@ -1204,10 +1204,84 @@
     </div>
   </div>
 
+  <!-- ========== MODAL WHATSAPP QR CODE (ESTILO WHATSAPP WEB) ========== -->
+  <div class="modal-backdrop hidden" id="whatsappQrModal" role="dialog" aria-modal="true" aria-labelledby="waQrTitle">
+    <div class="modal-card wa-qr-card">
+      <div class="modal-head">
+        <div>
+          <span class="lgpd-badge">WHATSAPP WEB • TEMPO REAL</span>
+          <h3 id="waQrTitle">Conectar WhatsApp via QR Code</h3>
+        </div>
+        <button type="button" class="icon-btn" id="btnCloseWaQr" title="Fechar">×</button>
+      </div>
+
+      <!-- Etapa 1: Nome e departamento antes de gerar o QR Code -->
+      <div class="wa-qr-setup" id="waQrSetupStep">
+        <div class="modal-body">
+          <label for="waConnNameInput">Nome desta conexão WhatsApp</label>
+          <input type="text" id="waConnNameInput" class="field-input" placeholder="Ex: WhatsApp Comercial SMV" />
+          <label for="waConnDeptSelect">Departamento padrão para novos chamados</label>
+          <select id="waConnDeptSelect" class="field-select">
+            <option value="Admin/Financeiro">Admin/Financeiro</option>
+            <option value="Comercial">Comercial</option>
+            <option value="Marketing">Marketing</option>
+            <option value="Suporte" selected>Suporte</option>
+            <option value="TI">TI</option>
+            <option value="Diretoria">Diretoria</option>
+          </select>
+        </div>
+        <div class="modal-foot">
+          <button type="button" class="btn secondary pill" id="btnCancelWaQrSetup">Cancelar</button>
+          <button type="button" class="btn primary pill" id="btnStartWaQr">Gerar QR Code</button>
+        </div>
+      </div>
+
+      <!-- Etapa 2: Exibição do QR Code real + instruções -->
+      <div class="wa-qr-scan hidden" id="waQrScanStep">
+        <div class="wa-qr-layout">
+          <div class="wa-qr-instructions">
+            <h4>Como conectar seu WhatsApp</h4>
+            <ol>
+              <li>Abra o <strong>WhatsApp</strong> no seu celular.</li>
+              <li>Toque em <strong>Mais opções (⋮)</strong> no Android ou <strong>Configurações</strong> no iPhone.</li>
+              <li>Toque em <strong>Aparelhos conectados</strong> e depois em <strong>Conectar aparelho</strong>.</li>
+              <li>Aponte a câmera do celular para o <strong>QR Code</strong> ao lado.</li>
+            </ol>
+            <div class="wa-qr-status-pill" id="waQrStatusPill">
+              <span class="wa-qr-dot"></span>
+              <span id="waQrStatusText">Iniciando conexão segura com o WhatsApp...</span>
+            </div>
+          </div>
+
+          <div class="wa-qr-box-wrap">
+            <div class="wa-qr-frame">
+              <div class="wa-qr-loader" id="waQrLoader">
+                <div class="wa-spinner"></div>
+                <span>Gerando QR Code...</span>
+              </div>
+              <img id="waQrImage" class="wa-qr-img hidden" alt="QR Code do WhatsApp" />
+              <div class="wa-qr-connected-box hidden" id="waQrConnectedBox">
+                <div class="wa-check-circle">✓</div>
+                <strong>WhatsApp Conectado!</strong>
+                <span id="waQrConnectedPhone">Sincronizando conversas...</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-foot">
+          <button type="button" class="btn secondary pill" id="btnRegenerateWaQr">Gerar novo QR</button>
+          <button type="button" class="btn primary pill" id="btnDoneWaQr">Fechar</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- ========== TOASTS ========== -->
   <div class="toast-stack" id="toastStack"></div>
 
-  <script src="data.js?v=20261123-11"></script>
-  <script src="app.js?v=20261123-11"></script>
+  <script src="http://localhost:3333/socket.io/socket.io.js"></script>
+  <script src="api.js?v=20261123-12"></script>
+  <script src="data.js?v=20261123-12"></script>
+  <script src="app.js?v=20261123-12"></script>
 </body>
 </html>

@@ -4,6 +4,7 @@
 
 (function () {
   const DATA = window.SMV_SAC_DATA;
+  const API = window.SMV_API;
 
   // Garante usuários extras da rede no mesmo domínio para transferências
   const EXTRA_DOMAIN_AGENTS = [
@@ -29,8 +30,11 @@
 
   const state = {
     authenticated: false,
+    apiConnected: false,
     lgpdAccepted: false,
     pendingUser: null,
+    waQrConnectionId: null,
+    waQrPollTimer: null,
     currentUser: {
       name: 'Ransay',
       email: 'ransay@supermegavendas.com',
@@ -107,7 +111,7 @@
       },
     ],
     connQuotas: {
-      WhatsApp: 2,
+      WhatsApp: 5,
       WebChat: 1,
       Telegram: 1,
       'WhatsApp Business API': 0,
@@ -398,6 +402,395 @@
   }
 
   // ========================================================================
+  // INTEGRAÇÃO BACK-END REAL + SOCKET.IO + WHATSAPP QR CODE (BAILEYS)
+  // ========================================================================
+  function formatIsoTime(iso) {
+    if (!iso) return nowTime();
+    try {
+      return new Date(iso).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    } catch {
+      return nowTime();
+    }
+  }
+
+  function mapBackendConversation(c) {
+    const createdMs = c.createdAt ? new Date(c.createdAt).getTime() : Date.now();
+    const lastMs = c.lastMessageAt ? new Date(c.lastMessageAt).getTime() : createdMs;
+    const waitMinutes = Math.max(0, Math.round((Date.now() - lastMs) / 60000));
+    const existing = state.conversations.find((x) => x.id === c.id);
+
+    return {
+      id: c.id,
+      isRemote: true,
+      ticketNumber: c.ticketNumber,
+      status: c.status === 'resolved' ? 'resolved' : 'open',
+      assignee: c.assigneeId || 'queue',
+      connectionId: c.connectionId,
+      connection: c.connection,
+      channel: c.channel || 'WhatsApp',
+      departmentId: c.departmentId,
+      department: c.department || 'Suporte',
+      unread: c.unread || 0,
+      updatedAt: formatIsoTime(c.lastMessageAt),
+      createdTs: createdMs,
+      lastMessageTs: lastMs,
+      waitMinutes,
+      labels: Array.isArray(c.labels) ? c.labels : [],
+      contact: c.contact,
+      messages:
+        existing?.messages?.length
+          ? existing.messages
+          : c.lastMessage
+            ? [
+                {
+                  id: c.lastMessage.id,
+                  type: c.lastMessage.type,
+                  sender: c.lastMessage.type === 'incoming' ? c.contact.name : 'Você',
+                  text: c.lastMessage.text,
+                  time: formatIsoTime(c.lastMessage.createdAt),
+                },
+              ]
+            : [],
+      _messagesLoaded: Boolean(existing?._messagesLoaded),
+    };
+  }
+
+  function mapBackendMessage(m) {
+    let attachment = null;
+    if (m.attachment) {
+      const mime = m.attachment.mimeType || '';
+      if (mime.startsWith('image/') && m.attachment.url) {
+        attachment = { kind: 'image', url: m.attachment.url, name: m.attachment.fileName };
+      } else if (mime.startsWith('audio/')) {
+        attachment = { kind: 'audio', name: m.attachment.fileName, duration: '' };
+      } else {
+        attachment = {
+          kind: 'document',
+          name: m.attachment.fileName,
+          size: m.attachment.sizeBytes ? `${Math.round(m.attachment.sizeBytes / 1024)} KB` : 'Anexo',
+        };
+      }
+    }
+    return {
+      id: m.id,
+      externalId: m.externalId || null,
+      type: m.type || 'incoming',
+      sender: m.sender || 'Contato',
+      text: m.text || '',
+      quote: m.quote || null,
+      attachment,
+      deliveryStatus: m.deliveryStatus || 'SENT',
+      time: formatIsoTime(m.createdAt),
+    };
+  }
+
+  async function loadBackendConnections() {
+    if (!state.apiConnected || !API) return;
+    try {
+      const { connections } = await API.getConnections();
+      if (Array.isArray(connections)) {
+        state.connections = connections.map((c) => {
+          const prev = state.connections.find((x) => x.id === c.id);
+          return {
+            ...c,
+            isRemote: true,
+            events: prev?.events || [
+              {
+                title:
+                  c.sessionState === 'connected'
+                    ? 'Sessão conectada com sucesso'
+                    : c.sessionState === 'qr'
+                      ? 'Aguardando leitura do QR Code'
+                      : 'Conexão registrada no SMV Sac',
+                actor: 'Sistema SMV Sac',
+                time: formatIsoTime(c.createdAt),
+                tone: c.sessionState === 'connected' ? 'success' : 'info',
+              },
+            ],
+          };
+        });
+        if (state.view === 'connections') renderConnections();
+      }
+    } catch (err) {
+      console.warn('[API] Falha ao carregar conexões:', err);
+    }
+  }
+
+  async function loadBackendConversations(selectFirst = false) {
+    if (!state.apiConnected || !API) return;
+    try {
+      const { conversations } = await API.getConversations({ status: 'all', tab: 'all' });
+      if (Array.isArray(conversations) && conversations.length > 0) {
+        state.conversations = conversations.map(mapBackendConversation);
+        if (selectFirst || !state.conversations.some((c) => c.id === state.selectedConvId)) {
+          state.selectedConvId = state.conversations[0].id;
+        }
+        renderConversations();
+        void loadMessagesForConversation(state.selectedConvId);
+      } else if (Array.isArray(conversations)) {
+        // Se ainda não há conversas reais no banco, mantém tela limpa pronta para receber do WhatsApp
+        state.conversations = [];
+        state.selectedConvId = null;
+        renderConversations();
+      }
+    } catch (err) {
+      console.warn('[API] Falha ao carregar conversas:', err);
+    }
+  }
+
+  async function loadMessagesForConversation(conversationId) {
+    if (!state.apiConnected || !API || !conversationId || typeof conversationId !== 'string') return;
+    const conv = state.conversations.find((c) => c.id === conversationId);
+    if (!conv || !conv.isRemote) return;
+    try {
+      const { messages } = await API.getMessages(conversationId);
+      if (Array.isArray(messages)) {
+        conv.messages = messages.map(mapBackendMessage);
+        conv._messagesLoaded = true;
+        if (state.selectedConvId === conversationId) {
+          renderActiveChat();
+        }
+      }
+    } catch (err) {
+      console.warn('[API] Falha ao carregar mensagens:', err);
+    }
+  }
+
+  function stopWaQrPolling() {
+    if (state.waQrPollTimer) {
+      clearInterval(state.waQrPollTimer);
+      state.waQrPollTimer = null;
+    }
+  }
+
+  function closeWaQrModal() {
+    stopWaQrPolling();
+    state.waQrConnectionId = null;
+    $('#whatsappQrModal').classList.add('hidden');
+  }
+
+  function updateWaQrModalState({ status, qrDataUrl, identifier }) {
+    const loader = $('#waQrLoader');
+    const img = $('#waQrImage');
+    const connectedBox = $('#waQrConnectedBox');
+    const statusPill = $('#waQrStatusPill');
+    const statusText = $('#waQrStatusText');
+
+    statusPill.classList.remove('connected');
+
+    if (status === 'CONNECTED') {
+      loader.classList.add('hidden');
+      img.classList.add('hidden');
+      connectedBox.classList.remove('hidden');
+      $('#waQrConnectedPhone').textContent = identifier
+        ? `${identifier} • Sincronizando conversas...`
+        : 'Sincronizando conversas...';
+      statusPill.classList.add('connected');
+      statusText.textContent = `Conectado (${identifier || 'WhatsApp'})!`;
+      stopWaQrPolling();
+
+      void loadBackendConnections();
+      setTimeout(() => {
+        void loadBackendConversations(true);
+        closeWaQrModal();
+        state.connSubView = 'list';
+        setView('conversations');
+        toast(`✅ WhatsApp conectado (${identifier || 'Ativo'})! Conversas sincronizando em tempo real.`);
+      }, 1500);
+      return;
+    }
+
+    connectedBox.classList.add('hidden');
+
+    if (qrDataUrl) {
+      loader.classList.add('hidden');
+      img.src = qrDataUrl;
+      img.classList.remove('hidden');
+      statusText.textContent = 'QR Code pronto! Aponte a câmera do WhatsApp para conectar.';
+    } else {
+      img.classList.add('hidden');
+      loader.classList.remove('hidden');
+      statusText.textContent = 'Gerando QR Code com os servidores do WhatsApp...';
+    }
+  }
+
+  function startWaQrPolling(connectionId) {
+    stopWaQrPolling();
+    state.waQrPollTimer = setInterval(async () => {
+      if (!state.apiConnected || !state.waQrConnectionId || state.waQrConnectionId !== connectionId) {
+        stopWaQrPolling();
+        return;
+      }
+      try {
+        const snap = await API.getWhatsAppQr(connectionId);
+        updateWaQrModalState(snap);
+      } catch {
+        // Aguarda próximo ciclo
+      }
+    }, 2200);
+  }
+
+  async function openWhatsAppQrModal(existingConn = null) {
+    if (!state.apiConnected) {
+      toast('Inicie o servidor back-end (npm run dev na porta 3333) e faça login novamente para gerar o QR Code real do WhatsApp.');
+      openConnectionFormModal(existingConn, 'WhatsApp');
+      return;
+    }
+
+    $('#whatsappQrModal').classList.remove('hidden');
+
+    if (existingConn) {
+      state.waQrConnectionId = existingConn.id;
+      $('#waQrTitle').textContent = `Conectar WhatsApp — ${existingConn.name}`;
+      $('#waQrSetupStep').classList.add('hidden');
+      $('#waQrScanStep').classList.remove('hidden');
+      updateWaQrModalState({ status: 'CONNECTING', qrDataUrl: null, identifier: existingConn.identifier });
+      try {
+        const snap = await API.connectWhatsApp(existingConn.id);
+        updateWaQrModalState(snap);
+        startWaQrPolling(existingConn.id);
+      } catch (err) {
+        toast(`Erro ao gerar QR Code: ${err.message}`);
+      }
+    } else {
+      state.waQrConnectionId = null;
+      $('#waQrTitle').textContent = 'Conectar WhatsApp via QR Code';
+      $('#waConnNameInput').value = '';
+      $('#waConnDeptSelect').value = 'Suporte';
+      $('#waQrSetupStep').classList.remove('hidden');
+      $('#waQrScanStep').classList.add('hidden');
+      setTimeout(() => $('#waConnNameInput').focus(), 20);
+    }
+  }
+
+  async function bootstrapBackendSession() {
+    if (!state.apiConnected || !API) return;
+
+    try {
+      const meta = await API.getConversationsMeta();
+      if (Array.isArray(meta.departments) && meta.departments.length > 0) {
+        DATA.departments = meta.departments.map((d) => d.name);
+        state.backendDepartments = meta.departments;
+      }
+      if (Array.isArray(meta.agents) && meta.agents.length > 0) {
+        DATA.agents = [
+          { id: 'queue', name: 'Na Fila (Sem atendente)' },
+          ...meta.agents.map((a) => ({
+            id: a.id,
+            name: a.id === DATA.currentAgent.id ? `${a.name} (${a.role === 'ADMIN' ? 'Admin' : 'Você'})` : a.name,
+          })),
+        ];
+      }
+      if (Array.isArray(meta.cannedResponses) && meta.cannedResponses.length > 0) {
+        DATA.cannedResponses = meta.cannedResponses.map((c) => ({
+          code: c.shortcode,
+          title: c.title,
+          content: c.content,
+        }));
+      }
+    } catch (err) {
+      console.warn('[API] Falha ao carregar metadados:', err);
+    }
+
+    await Promise.all([loadBackendConnections(), loadBackendConversations(true)]);
+
+    // Conecta Socket.IO autenticado para receber QR Code, status e mensagens em tempo real!
+    API.connectSocket({
+      onWhatsAppQr(payload) {
+        const target = state.connections.find((c) => c.id === payload.connectionId);
+        if (target) {
+          target.sessionState = 'qr';
+          target.qrDataUrl = payload.qrDataUrl;
+          if (state.view === 'connections') renderConnections();
+        }
+        if (state.waQrConnectionId === payload.connectionId) {
+          updateWaQrModalState(payload);
+        }
+      },
+      onWhatsAppStatus(payload) {
+        const target = state.connections.find((c) => c.id === payload.connectionId);
+        if (target) {
+          if (payload.status === 'CONNECTED') {
+            target.sessionState = 'connected';
+            target.status = 'active';
+            if (payload.identifier) target.identifier = payload.identifier;
+            pushConnectionEvent(target, `WhatsApp conectado (${target.identifier})`, 'success');
+          } else if (payload.status === 'PAUSED') {
+            target.sessionState = 'paused';
+          } else if (payload.status === 'CONNECTING') {
+            target.sessionState = 'restarting';
+          } else if (payload.status === 'DISCONNECTED') {
+            target.sessionState = 'disconnected';
+            pushConnectionEvent(target, 'WhatsApp desconectado', 'danger');
+          }
+          if (state.view === 'connections') renderConnections();
+        }
+        if (state.waQrConnectionId === payload.connectionId) {
+          updateWaQrModalState(payload);
+        }
+      },
+      onHistorySynced(payload) {
+        void loadBackendConversations(false);
+        if (payload?.syncedMessages > 0) {
+          toast(`📥 ${payload.syncedMessages} mensagens sincronizadas do WhatsApp!`);
+        }
+      },
+      onConversationUpdated(convPayload) {
+        const mapped = mapBackendConversation(convPayload);
+        const idx = state.conversations.findIndex((c) => c.id === mapped.id);
+        if (idx >= 0) {
+          mapped.messages = state.conversations[idx].messages;
+          mapped._messagesLoaded = state.conversations[idx]._messagesLoaded;
+          state.conversations[idx] = mapped;
+        } else {
+          state.conversations.unshift(mapped);
+          if (!state.selectedConvId) state.selectedConvId = mapped.id;
+        }
+        if (state.view === 'conversations') renderConversations();
+        else updateGlobalCounts();
+      },
+      onMessageCreated(payload) {
+        const conv = state.conversations.find((c) => c.id === payload.conversationId);
+        const mappedMsg = mapBackendMessage(payload.message);
+        if (conv) {
+          const alreadyExists = conv.messages.some(
+            (m) => m.id === mappedMsg.id || (mappedMsg.externalId && m.externalId === mappedMsg.externalId)
+          );
+          if (!alreadyExists) {
+            conv.messages.push(mappedMsg);
+          }
+          conv.updatedAt = mappedMsg.time;
+          conv.lastMessageTs = Date.now();
+          if (mappedMsg.type === 'incoming') {
+            if (state.selectedConvId !== conv.id || state.view !== 'conversations') {
+              conv.unread = (conv.unread || 0) + 1;
+            }
+            pushNotification({
+              category: 'ticket',
+              title: `${conv.ticketNumber || 'Nova mensagem'} • ${conv.contact.name}`,
+              message: mappedMsg.text.slice(0, 90),
+              convId: conv.id,
+            });
+          }
+          if (state.view === 'conversations') renderConversations();
+          else updateGlobalCounts();
+        } else {
+          void loadBackendConversations(false);
+        }
+      },
+      onMessageStatus(payload) {
+        const conv = state.conversations.find((c) => c.id === payload.conversationId);
+        if (!conv) return;
+        const msg = conv.messages.find((m) => m.id === payload.messageId);
+        if (msg) {
+          msg.deliveryStatus = payload.deliveryStatus;
+          if (state.selectedConvId === conv.id) renderActiveChat();
+        }
+      },
+    });
+  }
+
+  // ========================================================================
   // NAVEGAÇÃO TOPBAR
   // ========================================================================
   function setView(viewName) {
@@ -516,9 +909,17 @@
 
       $$('.conv-row').forEach((row) => {
         row.addEventListener('click', () => {
-          state.selectedConvId = Number(row.dataset.convId);
+          const rawId = row.dataset.convId;
+          const matched = state.conversations.find((c) => String(c.id) === String(rawId));
+          state.selectedConvId = matched ? matched.id : Number(rawId);
           const selected = getSelectedConv();
-          if (selected) selected.unread = 0;
+          if (selected) {
+            selected.unread = 0;
+            if (state.apiConnected && selected.isRemote) {
+              void API.markConversationRead(selected.id).catch(() => {});
+              void loadMessagesForConversation(selected.id);
+            }
+          }
           renderConversations();
         });
       });
@@ -529,7 +930,13 @@
 
   function renderActiveChat() {
     const conv = getSelectedConv();
-    if (!conv) return;
+    if (!conv) {
+      $('#chatCustomerName').textContent = 'Selecione uma conversa';
+      $('#chatHeaderPills').innerHTML = '';
+      $('#chatMessages').innerHTML =
+        '<div class="empty-hint" style="margin:auto;text-align:center;">Conecte um WhatsApp via QR Code em <strong>Conexões → + Adicionar</strong> ou selecione um chamado ao lado.</div>';
+      return;
+    }
 
     $('#chatAvatar').innerHTML = `
       <span>${escapeHtml(conv.contact.initials)}</span>
@@ -707,13 +1114,40 @@
   // ========================================================================
   // ENVIAR MENSAGENS & RESPOSTAS RÁPIDAS
   // ========================================================================
-  function sendMessage() {
+  async function sendMessage() {
     const input = $('#composerInput');
     const text = input.value.trim();
     if (!text) return;
 
     const conv = getSelectedConv();
     if (!conv) return;
+
+    input.value = '';
+    input.style.height = 'auto';
+    hideCanned();
+
+    if (state.apiConnected && conv.isRemote && API) {
+      try {
+        const visibility = state.privateMode ? 'PRIVATE_NOTE' : 'PUBLIC';
+        const res = await API.sendTextMessage(conv.id, text, visibility);
+        if (res?.message) {
+          const mapped = mapBackendMessage(res.message);
+          if (!conv.messages.some((m) => m.id === mapped.id)) {
+            conv.messages.push(mapped);
+          }
+          conv.updatedAt = mapped.time;
+          conv.lastMessageTs = Date.now();
+          if (!state.privateMode && conv.assignee === 'queue') {
+            conv.assignee = DATA.currentAgent.id;
+          }
+          renderConversations();
+        }
+      } catch (err) {
+        input.value = text;
+        toast(`❌ ${err.message || 'Falha ao enviar mensagem'}`);
+      }
+      return;
+    }
 
     conv.messages.push({
       id: 'm_' + Date.now(),
@@ -730,9 +1164,6 @@
       conv.assignee = DATA.currentAgent.id;
     }
 
-    input.value = '';
-    input.style.height = 'auto';
-    hideCanned();
     renderConversations();
   }
 
@@ -906,7 +1337,11 @@
         const available = Math.max(0, quota - used);
 
         if (quota > 0 && available > 0) {
-          openConnectionFormModal(null, channel);
+          if (channel === 'WhatsApp') {
+            void openWhatsAppQrModal(null);
+          } else {
+            openConnectionFormModal(null, channel);
+          }
         } else {
           openUpgradeConnectionModal(channel, quota > 0);
         }
@@ -952,7 +1387,8 @@
 
     const getConnStatusMeta = (c) => {
       if (c.status === 'archived') return { cls: 'archived', label: 'Arquivada' };
-      if (c.sessionState === 'restarting') return { cls: 'restarting', label: 'Reiniciando...' };
+      if (c.sessionState === 'qr') return { cls: 'restarting', label: 'Aguardando QR' };
+      if (c.sessionState === 'connecting' || c.sessionState === 'restarting') return { cls: 'restarting', label: 'Conectando...' };
       if (c.sessionState === 'paused') return { cls: 'paused', label: 'Pausado' };
       if (c.sessionState === 'disconnected') return { cls: 'disconnected', label: 'Desconectado' };
       return { cls: '', label: 'Conectado' };
@@ -1055,7 +1491,11 @@
                   <span class="status-pill ${statusMeta.cls}">
                     <i></i> ${statusMeta.label}
                   </span>
-                  <button class="conn-action-link" data-filter-conn="${escapeHtml(c.name)}">Ver fila →</button>
+                  ${
+                    c.channel === 'WhatsApp' && c.status === 'active' && c.sessionState !== 'connected'
+                      ? `<button class="conn-action-link" data-wa-qr-conn="${escapeHtml(c.id)}">Conectar QR Code →</button>`
+                      : `<button class="conn-action-link" data-filter-conn="${escapeHtml(c.name)}">Ver fila →</button>`
+                  }
                 </div>
               </div>
             </div>
@@ -1079,6 +1519,14 @@
           const id = btn.dataset.connId;
           state.openConnMenuId = null;
           handleConnectionAction(action, id);
+        };
+      });
+
+      $$('[data-wa-qr-conn]').forEach((btn) => {
+        btn.onclick = (e) => {
+          e.stopPropagation();
+          const target = state.connections.find((x) => x.id === btn.dataset.waQrConn);
+          if (target) void openWhatsAppQrModal(target);
         };
       });
 
@@ -1225,6 +1673,10 @@
     }
 
     if (action === 'archive') {
+      const nextAction = conn.status === 'active' ? 'archive' : 'activate';
+      if (state.apiConnected && conn.isRemote) {
+        void API.updateConnectionStatus(conn.id, nextAction).catch(() => {});
+      }
       conn.status = conn.status === 'active' ? 'archived' : 'active';
       if (conn.status === 'active' && conn.sessionState === 'disconnected') {
         conn.sessionState = 'connected';
@@ -1245,6 +1697,10 @@
       pushConnectionEvent(conn, 'Reinicialização da sessão solicitada', 'warning');
       renderConnections();
       toast(`Reiniciando conexão "${conn.name}"...`);
+      if (state.apiConnected && conn.isRemote) {
+        void API.restartConnection(conn.id).catch((err) => toast(`Erro ao reiniciar: ${err.message}`));
+        return;
+      }
       setTimeout(() => {
         const target = state.connections.find((x) => x.id === id);
         if (!target) return;
@@ -1258,10 +1714,12 @@
 
     if (action === 'pause') {
       if (conn.sessionState === 'paused') {
+        if (state.apiConnected && conn.isRemote) void API.updateConnectionStatus(conn.id, 'resume').catch(() => {});
         conn.sessionState = 'connected';
         pushConnectionEvent(conn, 'Atendimentos da conexão retomados', 'success');
         toast(`Conexão "${conn.name}" retomada!`);
       } else {
+        if (state.apiConnected && conn.isRemote) void API.updateConnectionStatus(conn.id, 'pause').catch(() => {});
         conn.sessionState = 'paused';
         pushConnectionEvent(conn, 'Conexão pausada temporariamente', 'warning');
         pushNotification({
@@ -1278,10 +1736,15 @@
 
     if (action === 'disconnect') {
       if (conn.sessionState === 'disconnected') {
+        if (state.apiConnected && conn.isRemote && conn.channel === 'WhatsApp') {
+          void openWhatsAppQrModal(conn);
+          return;
+        }
         conn.sessionState = 'connected';
         pushConnectionEvent(conn, 'Sessão reconectada manualmente', 'success');
         toast(`Conexão "${conn.name}" reconectada!`);
       } else {
+        if (state.apiConnected && conn.isRemote) void API.updateConnectionStatus(conn.id, 'disconnect').catch(() => {});
         conn.sessionState = 'disconnected';
         pushConnectionEvent(conn, 'Sessão desconectada manualmente', 'danger');
         pushNotification({
@@ -2020,6 +2483,14 @@
         silent: true,
       });
 
+      if (state.apiConnected && conv.isRemote && API) {
+        API.transferConversation(conv.id, {
+          departmentName: dept,
+          assigneeId: targetAgentId === 'queue' ? null : targetAgentId,
+          comment: comment || undefined,
+        }).catch((err) => toast(`Erro ao transferir no servidor: ${err.message}`));
+      }
+
       closeTransferModal();
       renderConversations();
       toast(`${conv.ticketNumber || 'Chamado'} transferido para ${destLabel}!`);
@@ -2030,11 +2501,16 @@
 
     $('#btnResolveToggle').addEventListener('click', () => {
       const conv = getSelectedConv();
-      conv.status = conv.status === 'resolved' ? 'open' : 'resolved';
+      if (!conv) return;
+      const nextStatus = conv.status === 'resolved' ? 'open' : 'resolved';
+      conv.status = nextStatus;
+      if (state.apiConnected && conv.isRemote && API) {
+        API.updateConversationStatus(conv.id, nextStatus === 'resolved' ? 'RESOLVED' : 'OPEN').catch(() => {});
+      }
       conv.messages.push({
         id: 'act_' + Date.now(),
         type: 'activity',
-        text: conv.status === 'resolved' ? 'Atendimento finalizado por Lucas Mendes' : 'Atendimento reaberto por Lucas Mendes',
+        text: conv.status === 'resolved' ? `Atendimento finalizado por ${DATA.currentAgent.name}` : `Atendimento reaberto por ${DATA.currentAgent.name}`,
         time: nowTime(),
       });
       renderConversations();
@@ -2291,44 +2767,69 @@
       });
     });
 
-    $('#fileInputDocument').addEventListener('change', (e) => {
+    const sendRealFileIfRemote = async (file) => {
+      const conv = getSelectedConv();
+      if (!state.apiConnected || !conv?.isRemote || !API) return false;
+      try {
+        const res = await API.sendFileMessage(conv.id, file, '', state.privateMode ? 'PRIVATE_NOTE' : 'PUBLIC');
+        if (res?.message) {
+          const mapped = mapBackendMessage(res.message);
+          if (!conv.messages.some((m) => m.id === mapped.id)) conv.messages.push(mapped);
+          conv.updatedAt = mapped.time;
+          conv.lastMessageTs = Date.now();
+          renderConversations();
+        }
+        return true;
+      } catch (err) {
+        toast(`❌ Erro ao enviar arquivo pelo WhatsApp: ${err.message}`);
+        return true;
+      }
+    };
+
+    $('#fileInputDocument').addEventListener('change', async (e) => {
       const file = e.target.files?.[0];
       if (!file) return;
-      pushRichMessage({
-        text: '',
-        attachment: { kind: 'document', name: file.name, size: formatFileSize(file.size) },
-      });
+      if (!(await sendRealFileIfRemote(file))) {
+        pushRichMessage({
+          text: '',
+          attachment: { kind: 'document', name: file.name, size: formatFileSize(file.size) },
+        });
+      }
       e.target.value = '';
       toast(`📄 Documento "${file.name}" enviado!`);
     });
 
-    const handleMediaFile = (e, label) => {
+    const handleMediaFile = async (e, label) => {
       const file = e.target.files?.[0];
       if (!file) return;
-      const isImage = file.type.startsWith('image/');
-      if (isImage) {
-        const url = URL.createObjectURL(file);
-        pushRichMessage({ text: '', attachment: { kind: 'image', url, name: file.name } });
-      } else {
-        pushRichMessage({
-          text: '',
-          attachment: { kind: 'document', name: `🎬 ${file.name}`, size: formatFileSize(file.size) },
-        });
+      if (!(await sendRealFileIfRemote(file))) {
+        const isImage = file.type.startsWith('image/');
+        if (isImage) {
+          const url = URL.createObjectURL(file);
+          pushRichMessage({ text: '', attachment: { kind: 'image', url, name: file.name } });
+        } else {
+          pushRichMessage({
+            text: '',
+            attachment: { kind: 'document', name: `🎬 ${file.name}`, size: formatFileSize(file.size) },
+          });
+        }
       }
       e.target.value = '';
       toast(`${label} "${file.name}" enviado!`);
     };
 
-    $('#fileInputMedia').addEventListener('change', (e) => handleMediaFile(e, '🖼️ Mídia'));
-    $('#fileInputCamera').addEventListener('change', (e) => handleMediaFile(e, '📷 Foto'));
+    $('#fileInputMedia').addEventListener('change', (e) => void handleMediaFile(e, '🖼️ Mídia'));
+    $('#fileInputCamera').addEventListener('change', (e) => void handleMediaFile(e, '📷 Foto'));
 
-    $('#fileInputAudio').addEventListener('change', (e) => {
+    $('#fileInputAudio').addEventListener('change', async (e) => {
       const file = e.target.files?.[0];
       if (!file) return;
-      pushRichMessage({
-        text: '',
-        attachment: { kind: 'audio', name: file.name, duration: formatFileSize(file.size) },
-      });
+      if (!(await sendRealFileIfRemote(file))) {
+        pushRichMessage({
+          text: '',
+          attachment: { kind: 'audio', name: file.name, duration: formatFileSize(file.size) },
+        });
+      }
       e.target.value = '';
       toast(`🎧 Áudio "${file.name}" enviado!`);
     });
@@ -2542,17 +3043,92 @@
       if (e.target === $('#eventsConnModal')) closeEventsConnModal();
     });
 
+    // Modal WhatsApp QR Code
+    $('#btnCloseWaQr').addEventListener('click', closeWaQrModal);
+    $('#btnCancelWaQrSetup').addEventListener('click', closeWaQrModal);
+    $('#btnDoneWaQr').addEventListener('click', () => {
+      closeWaQrModal();
+      void loadBackendConnections();
+      state.connSubView = 'list';
+      renderConnections();
+    });
+    $('#whatsappQrModal').addEventListener('click', (e) => {
+      if (e.target === $('#whatsappQrModal')) closeWaQrModal();
+    });
+
+    $('#btnStartWaQr').addEventListener('click', async () => {
+      const name = $('#waConnNameInput').value.trim() || 'WhatsApp SMV';
+      const departmentName = $('#waConnDeptSelect').value || 'Suporte';
+
+      $('#waQrSetupStep').classList.add('hidden');
+      $('#waQrScanStep').classList.remove('hidden');
+      $('#waQrTitle').textContent = `Conectar WhatsApp — ${name}`;
+      updateWaQrModalState({ status: 'CONNECTING', qrDataUrl: null });
+
+      try {
+        const res = await API.createConnection({
+          name,
+          channel: 'WHATSAPP',
+          provider: 'BAILEYS',
+          departmentName,
+          autoStartQr: true,
+        });
+        const conn = res.connection;
+        state.waQrConnectionId = conn.id;
+        state.connections.unshift({ ...conn, isRemote: true, events: [] });
+        updateWaQrModalState({
+          status: conn.sessionState === 'qr' ? 'QR_PENDING' : 'CONNECTING',
+          qrDataUrl: conn.qrDataUrl,
+          identifier: conn.identifier,
+        });
+        startWaQrPolling(conn.id);
+      } catch (err) {
+        toast(`❌ Erro ao iniciar QR Code: ${err.message}`);
+        $('#waQrSetupStep').classList.remove('hidden');
+        $('#waQrScanStep').classList.add('hidden');
+      }
+    });
+
+    $('#btnRegenerateWaQr').addEventListener('click', async () => {
+      if (!state.waQrConnectionId || !state.apiConnected) return;
+      updateWaQrModalState({ status: 'CONNECTING', qrDataUrl: null });
+      try {
+        const snap = await API.connectWhatsApp(state.waQrConnectionId);
+        updateWaQrModalState(snap);
+        startWaQrPolling(state.waQrConnectionId);
+      } catch (err) {
+        toast(`Erro ao gerar novo QR: ${err.message}`);
+      }
+    });
+
     // Modal Excluir Conexão
     $('#btnCloseDeleteConn').addEventListener('click', closeDeleteConnModal);
     $('#btnCancelDeleteConn').addEventListener('click', closeDeleteConnModal);
     $('#deleteConnModal').addEventListener('click', (e) => {
       if (e.target === $('#deleteConnModal')) closeDeleteConnModal();
     });
-    $('#btnConfirmDeleteConn').addEventListener('click', () => {
+    $('#btnConfirmDeleteConn').addEventListener('click', async () => {
       const idx = state.connections.findIndex((c) => c.id === state.deletingConnId);
       if (idx !== -1) {
-        const [removed] = state.connections.splice(idx, 1);
-        toast(`Conexão "${removed.name}" excluída!`);
+        const target = state.connections[idx];
+        if (state.apiConnected && target.isRemote) {
+          try {
+            const res = await API.deleteConnection(target.id);
+            if (res.archived) {
+              target.status = 'archived';
+              target.sessionState = 'disconnected';
+              toast(res.message || `Conexão "${target.name}" arquivada.`);
+            } else {
+              state.connections.splice(idx, 1);
+              toast(`Conexão "${target.name}" excluída!`);
+            }
+          } catch (err) {
+            toast(`Erro ao excluir: ${err.message}`);
+          }
+        } else {
+          state.connections.splice(idx, 1);
+          toast(`Conexão "${target.name}" excluída!`);
+        }
       }
       closeDeleteConnModal();
       renderConnections();
@@ -2949,7 +3525,7 @@
       }
     }
 
-    $('#loginForm').addEventListener('submit', (e) => {
+    $('#loginForm').addEventListener('submit', async (e) => {
       e.preventDefault();
       const email = $('#loginEmail').value.trim().toLowerCase();
       const pwd = $('#loginPassword').value;
@@ -2964,6 +3540,33 @@
         err.textContent = 'Digite sua senha para continuar.';
         err.classList.remove('hidden');
         return;
+      }
+
+      // 1. Tenta autenticar no back-end real (Fastify + Supabase na porta 3333)
+      if (API) {
+        try {
+          const res = await API.login(email, pwd);
+          state.apiConnected = true;
+          state.lgpdAccepted = Boolean(res.lgpd?.accepted);
+          DATA.currentAgent.id = res.user.id;
+          err.classList.add('hidden');
+          startAuthFlow({
+            id: res.user.id,
+            name: res.user.name,
+            email: res.user.email,
+            role: res.user.role === 'ADMIN' ? 'Admin' : 'Agente',
+            subdomain: res.user.organization?.slug || 'supermegavendas',
+          });
+          return;
+        } catch (apiErr) {
+          if (apiErr.status === 401 || apiErr.status === 400) {
+            err.textContent = apiErr.message || 'E-mail ou senha inválidos.';
+            err.classList.remove('hidden');
+            return;
+          }
+          // Se o back-end estiver offline (erro de rede), segue com fallback local
+          state.apiConnected = false;
+        }
       }
 
       const matched = getRegisteredUsers().find(
@@ -3038,17 +3641,21 @@
       $('#btnLgpdConfirm').disabled = !e.target.checked;
     });
 
-    $('#btnLgpdConfirm').addEventListener('click', () => {
+    $('#btnLgpdConfirm').addEventListener('click', async () => {
       if (!$('#lgpdAcceptRequired').checked) return;
       state.lgpdAccepted = true;
+      const acceptedMarketing = $('#lgpdAcceptMarketing').checked;
       localStorage.setItem(
         'smv_sac_lgpd_consent',
         JSON.stringify({
           accepted: true,
-          marketing: $('#lgpdAcceptMarketing').checked,
+          marketing: acceptedMarketing,
           acceptedAt: new Date().toISOString(),
         })
       );
+      if (state.apiConnected && API) {
+        await API.recordLgpdConsent(acceptedMarketing).catch(() => {});
+      }
       closeLgpdModal();
       if (state.pendingUser) {
         completeLogin(state.pendingUser);
@@ -3070,8 +3677,13 @@
     $('#btnCloseLgpd').addEventListener('click', handleLgpdDecline);
 
     // Logout
-    $('#btnLogout').addEventListener('click', () => {
+    $('#btnLogout').addEventListener('click', async () => {
+      if (state.apiConnected && API) {
+        await API.logout();
+      }
+      stopWaQrPolling();
       state.authenticated = false;
+      state.apiConnected = false;
       state.lgpdAccepted = false;
       $('#appShell').classList.add('hidden');
       $('#authScreen').classList.remove('hidden');
@@ -3098,6 +3710,7 @@
         closeAboutModal();
         closeComposerActionModal();
         closeTransferModal();
+        closeWaQrModal();
         closeConvMenus();
         closeContactsImportMenu();
         closeTopbarPopovers();
@@ -3195,6 +3808,9 @@
     $('#authScreen').classList.add('hidden');
     $('#appShell').classList.remove('hidden');
     setView('conversations');
+    if (state.apiConnected) {
+      void bootstrapBackendSession();
+    }
     toast(
       user.isNew
         ? `Conta criada! Bem-vindo ao SMV Sac, ${user.name}!`

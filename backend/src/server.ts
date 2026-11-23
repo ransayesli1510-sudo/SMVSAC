@@ -3,12 +3,13 @@ import { buildApp } from './app.js';
 import { initRealtime } from './realtime/socket.js';
 import { registerWorkers } from './workers/index.js';
 import { prisma } from './shared/database/prisma.js';
+import { whatsappManager } from './modules/whatsapp/whatsapp.manager.js';
 
 async function bootstrap(): Promise<void> {
   registerWorkers();
 
   const app = await buildApp();
-  initRealtime(app.server);
+  initRealtime(app.server, app);
 
   const shutdown = async (signal: string) => {
     app.log.info(`Recebido ${signal}. Encerrando SMV Sac Backend...`);
@@ -22,6 +23,9 @@ async function bootstrap(): Promise<void> {
 
   await app.listen({ port: env.PORT, host: env.HOST });
   app.log.info(`🚀 SMV Sac Backend rodando em http://${env.HOST}:${env.PORT}`);
+
+  // Restaura sessões WhatsApp (Baileys) previamente pareadas que seguem ativas
+  void whatsappManager.restoreActiveSessions();
 }
 
 bootstrap().catch((err) => {

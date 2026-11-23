@@ -1,13 +1,15 @@
 import type { Server as HttpServer } from 'node:http';
+import type { FastifyInstance } from 'fastify';
 import { Server as SocketIOServer } from 'socket.io';
 import { env } from '../config/env.js';
+import type { AuthJwtPayload } from '../shared/http/authenticate.js';
 
 let ioInstance: SocketIOServer | null = null;
 
 // Mapa de presença em memória para o MVP (quando adicionar Redis, trocar por @socket.io/redis-adapter)
 const onlineUsersByOrg = new Map<string, Set<string>>();
 
-export function initRealtime(httpServer: HttpServer): SocketIOServer {
+export function initRealtime(httpServer: HttpServer, app: FastifyInstance): SocketIOServer {
   const io = new SocketIOServer(httpServer, {
     cors: {
       origin: env.CORS_ORIGIN.split(',').map((o) => o.trim()),
@@ -15,9 +17,35 @@ export function initRealtime(httpServer: HttpServer): SocketIOServer {
     },
   });
 
+  // Autentica todas as conexões Socket.IO via JWT (isola estritamente por organizationId do token)
+  io.use((socket, next) => {
+    const rawToken =
+      (typeof socket.handshake.auth?.token === 'string' && socket.handshake.auth.token) ||
+      (typeof socket.handshake.headers.authorization === 'string'
+        ? socket.handshake.headers.authorization.replace(/^Bearer\s+/i, '')
+        : '');
+
+    if (!rawToken) {
+      return next(new Error('UNAUTHORIZED'));
+    }
+
+    try {
+      const decoded = app.jwt.verify<AuthJwtPayload>(rawToken);
+      if (decoded.tokenType !== 'access' || !decoded.organizationId || !decoded.sub) {
+        return next(new Error('INVALID_TOKEN'));
+      }
+      socket.data.organizationId = decoded.organizationId;
+      socket.data.userId = decoded.sub;
+      socket.data.role = decoded.role;
+      return next();
+    } catch {
+      return next(new Error('UNAUTHORIZED'));
+    }
+  });
+
   io.on('connection', (socket) => {
-    const orgId = String(socket.handshake.auth?.organizationId ?? '');
-    const userId = String(socket.handshake.auth?.userId ?? '');
+    const orgId = String(socket.data.organizationId ?? '');
+    const userId = String(socket.data.userId ?? '');
 
     if (orgId) {
       socket.join(`org:${orgId}`);
