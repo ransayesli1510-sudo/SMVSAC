@@ -5,26 +5,157 @@
 (function () {
   const DATA = window.SMV_SAC_DATA;
 
+  // Garante usuários extras da rede no mesmo domínio para transferências
+  const EXTRA_DOMAIN_AGENTS = [
+    { id: 'ozaniele', name: 'Ozaniele' },
+    { id: 'gabriel', name: 'Gabriel' },
+  ];
+  EXTRA_DOMAIN_AGENTS.forEach((ag) => {
+    if (!DATA.agents.some((a) => a.id === ag.id)) DATA.agents.push(ag);
+  });
+
+  function formatDateCompact(date = new Date()) {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}${m}${d}`;
+  }
+
+  let ticketSequence = 0;
+  function generateTicketNumber() {
+    ticketSequence += 1;
+    return `Chamado #${formatDateCompact()}-${String(ticketSequence).padStart(3, '0')}`;
+  }
+
   const state = {
     authenticated: false,
     lgpdAccepted: false,
     pendingUser: null,
+    currentUser: {
+      name: 'Ransay',
+      email: 'ransay@supermegavendas.com',
+      role: 'Admin',
+      subdomain: 'supermegavendas',
+    },
     theme: localStorage.getItem('smv_sac_theme') || 'dark',
     view: 'conversations', // conversations | connections | contacts | reports | ai
     tab: 'mine', // mine | queue | all
     statusFilter: 'open', // open | resolved | all
+    convSort: 'last_message_desc', // last_message_desc | oldest_first | newest_first | longest_wait | shortest_wait
+    convSidebarCollapsed: false,
     searchQuery: '',
     inChatSearch: '',
     selectedConvId: DATA.conversations[0].id,
     privateMode: false,
     connTab: 'active', // active | archived
+    connSubView: 'list', // list | add
     connSearch: '',
     connChannel: 'all',
+    openConnMenuId: null,
+    editingConnId: null,
+    viewingConnId: null,
+    deletingConnId: null,
+    upgradingChannel: null,
+    contactsFiltersOpen: false,
+    contactsConnFilter: 'all',
+    contactsDeptFilter: 'all',
+    contactsLabelFilter: 'all',
+    contactModalSource: 'conversations',
+    notifFilter: 'all', // all | ticket | alert
+    notifSoundEnabled: true,
+    manualTab: 'start',
+    emojiCat: 'faces',
+    composerActionType: null,
+    selectedQuickSticker: '🚀',
+    notifications: [
+      {
+        id: 'ntf_1',
+        category: 'ticket',
+        title: 'Novo chamado na Fila',
+        message: 'Mariana Albuquerque iniciou atendimento via WebChat (Vendas).',
+        time: 'há 2 min',
+        unread: true,
+        convId: 4,
+      },
+      {
+        id: 'ntf_2',
+        category: 'ticket',
+        title: 'Novo chamado na Fila',
+        message: 'Thiago Ferreira solicitou 2ª via de fatura / PIX via WhatsApp (Financeiro).',
+        time: 'há 8 min',
+        unread: true,
+        convId: 5,
+      },
+      {
+        id: 'ntf_3',
+        category: 'ticket',
+        title: 'Nova mensagem recebida',
+        message: 'SMV REMOTO - DÃO SILVEIRA: "Acessos liberados no Flow?"',
+        time: 'há 18 min',
+        unread: true,
+        convId: 3,
+      },
+      {
+        id: 'ntf_4',
+        category: 'alert',
+        title: 'Alerta de SLA na Fila',
+        message: 'Há 2 chamados aguardando atribuição há mais de 10 minutos.',
+        time: 'há 22 min',
+        unread: true,
+        viewTarget: 'conversations',
+        tabTarget: 'queue',
+      },
+    ],
+    connQuotas: {
+      WhatsApp: 2,
+      WebChat: 1,
+      Telegram: 1,
+      'WhatsApp Business API': 0,
+      Instagram: 0,
+      'Facebook Messenger': 0,
+      Email: 0,
+      SMS: 0,
+      'Reclame Aqui': 0,
+    },
     reportPeriod: '7d',
-    liveWidgetConvId: null,
     agentStatusIndex: 0,
-    conversations: JSON.parse(JSON.stringify(DATA.conversations)),
-    connections: JSON.parse(JSON.stringify(DATA.connections)),
+    conversations: JSON.parse(JSON.stringify(DATA.conversations)).map((c, idx) => {
+      const base = Date.now();
+      const createdOffsetsMin = [180, 120, 95, 25, 45];
+      const msgOffsetsMin = [2, 13, 108, 9, 25];
+      const waitOffsetsMin = [4, 15, 92, 19, 34];
+      return {
+        ...c,
+        ticketNumber: c.ticketNumber || generateTicketNumber(),
+        createdTs: base - (createdOffsetsMin[idx] ?? 60) * 60000,
+        lastMessageTs: base - (msgOffsetsMin[idx] ?? 10) * 60000,
+        waitMinutes: waitOffsetsMin[idx] ?? 15,
+      };
+    }),
+    connections: JSON.parse(JSON.stringify(DATA.connections)).map((c) => ({
+      ...c,
+      sessionState: c.status === 'archived' ? 'disconnected' : 'connected',
+      events: [
+        {
+          title: c.status === 'archived' ? 'Conexão arquivada' : 'Sessão conectada com sucesso',
+          actor: 'Sistema SMV Sac',
+          time: 'Hoje às 08:30',
+          tone: c.status === 'archived' ? 'warning' : 'success',
+        },
+        {
+          title: 'Webhook e sincronização verificados (200 OK)',
+          actor: 'Sistema SMV Sac',
+          time: 'Hoje às 08:29',
+          tone: 'info',
+        },
+        {
+          title: `Conexão ${c.channel} cadastrada no departamento ${c.department}`,
+          actor: 'Ransay (Admin)',
+          time: 'Ontem às 17:15',
+          tone: 'info',
+        },
+      ],
+    })),
   };
 
   const AGENT_STATUSES = [
@@ -78,6 +209,195 @@
   }
 
   // ========================================================================
+  // CENTRAL DE NOTIFICAÇÕES (ALERTAS E CHAMADOS) + MANUAL DE USO
+  // ========================================================================
+  const MANUAL_SECTIONS = {
+    start: `
+      <div class="manual-block">
+        <h4>1. Acesso e Conformidade LGPD</h4>
+        <p>Entre com seu e-mail corporativo e senha na tela inicial. No primeiro acesso, confirme o aceite do <strong>Termo de Privacidade (LGPD)</strong> para liberar o painel.</p>
+      </div>
+      <div class="manual-block">
+        <h4>2. Barra Superior de Navegação</h4>
+        <ul>
+          <li><strong>Conversas:</strong> gestão dos atendimentos abertos, fila e histórico.</li>
+          <li><strong>Conexões:</strong> canais conectados (WhatsApp, Webchat, Telegram, Instagram e outros).</li>
+          <li><strong>Contatos:</strong> base de clientes com importação/exportação CSV e filtros avançados.</li>
+          <li><strong>Relatórios:</strong> indicadores de desempenho, atendimentos por conexão e exportação CSV.</li>
+          <li><strong>Notificações (🔔) e Tema (☀️/🌙):</strong> alertas de novos chamados e alternância entre modo escuro e claro.</li>
+        </ul>
+      </div>
+      <div class="manual-block">
+        <h4>3. Status de Disponibilidade do Atendente</h4>
+        <p>Clique no seu avatar no canto superior direito para alternar entre <strong>Online</strong>, <strong>Ocupado</strong> e <strong>Offline</strong>.</p>
+      </div>
+    `,
+    conversations: `
+      <div class="manual-block">
+        <h4>Abas Minhas, Fila e Todas</h4>
+        <p>Acompanhe seus atendimentos ativos em <strong>Minhas</strong>, puxe clientes aguardando na <strong>Fila</strong> ou consulte o panorama completo em <strong>Todas</strong>.</p>
+      </div>
+      <div class="manual-block">
+        <h4>Botões + e ⋮ no Topo de Conversas</h4>
+        <ul>
+          <li><strong>+ (Adicionar):</strong> crie rapidamente um novo contato individual ou um novo grupo de atendimento.</li>
+          <li><strong>⋮ (Ordenar por):</strong> ordene por <em>Mensagem mais recente</em>, <em>Mais antigos</em>, <em>Mais recentes</em>, <em>Maior</em> ou <em>Menor tempo de espera</em>.</li>
+        </ul>
+      </div>
+      <div class="manual-block">
+        <h4>Envio de Mensagens, Notas Internas e Respostas Rápidas</h4>
+        <ul>
+          <li>Digite <strong><code>/</code></strong> no campo de texto (ou clique no <strong>+</strong> do composer) para inserir respostas prontas (<code>/ola</code>, <code>/acesso</code>, <code>/pix</code>, <code>/encerrar</code>).</li>
+          <li>Clique no cadeado 🔒 para ativar o modo <strong>Nota interna</strong> (visível apenas para a equipe).</li>
+          <li>Use o ícone de <strong>clipe (📎)</strong> para anexar documentos, imagens, áudios, contatos, enquetes, Pix, eventos ou figurinhas, e o ícone <strong>😊</strong> para inserir emojis.</li>
+        </ul>
+      </div>
+    `,
+    connections: `
+      <div class="manual-block">
+        <h4>Gerenciar Conexões Ativas e Arquivadas</h4>
+        <p>Nos <strong>três pontinhos (⋮)</strong> de cada card você pode <strong>Visualizar</strong>, consultar o <strong>Histórico de eventos</strong>, <strong>Editar</strong>, <strong>Arquivar</strong>, <strong>Reiniciar</strong>, <strong>Pausar</strong>, <strong>Desconectar</strong> ou <strong>Excluir</strong> a conexão.</p>
+      </div>
+      <div class="manual-block">
+        <h4>Adicionar Novas Conexões</h4>
+        <p>Clique em <strong>+ Adicionar</strong> para abrir o catálogo de canais (WhatsApp, Webchat, Telegram, WhatsApp Business API, Instagram, Facebook Messenger, Email, SMS e Reclame Aqui) e acompanhar o limite contratado de cada canal.</p>
+      </div>
+    `,
+    contacts: `
+      <div class="manual-block">
+        <h4>Importação, Exportação e Cadastro</h4>
+        <ul>
+          <li><strong>+ Importar contatos ▾:</strong> importe um arquivo <code>.csv</code> (<code>Nome,Telefone,Email</code>), baixe a planilha modelo ou exporte sua base filtrada.</li>
+          <li><strong>Novo contato:</strong> cadastre manualmente um contato vinculado a uma conexão e departamento.</li>
+          <li><strong>Exibir Filtros:</strong> combine busca textual com filtros por Conexão, Departamento e Tag.</li>
+        </ul>
+      </div>
+    `,
+    shortcuts: `
+      <div class="manual-block">
+        <h4>Atalhos de Teclado</h4>
+        <div class="manual-kbd-row"><span>Abrir Busca Rápida (Command Bar)</span><kbd>Ctrl + K</kbd></div>
+        <div class="manual-kbd-row"><span>Abrir Respostas Rápidas no chat</span><kbd>/</kbd></div>
+        <div class="manual-kbd-row"><span>Enviar mensagem</span><kbd>Enter</kbd></div>
+        <div class="manual-kbd-row"><span>Quebrar linha na mensagem</span><kbd>Shift + Enter</kbd></div>
+        <div class="manual-kbd-row"><span>Fechar modais e menus abertos</span><kbd>Esc</kbd></div>
+      </div>
+    `,
+  };
+
+  function playNotificationChime() {
+    if (!state.notifSoundEnabled) return;
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(880, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(1174.66, ctx.currentTime + 0.09);
+      gain.gain.setValueAtTime(0.08, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.22);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.23);
+    } catch {
+      // Áudio bloqueado antes de interação do usuário
+    }
+  }
+
+  function renderNotifications() {
+    const unreadCount = state.notifications.filter((n) => n.unread).length;
+    const badge = $('#notifUnreadBadge');
+    badge.textContent = unreadCount > 99 ? '99+' : unreadCount;
+    badge.classList.toggle('hidden', unreadCount === 0);
+
+    const headerCount = $('#notifHeaderCount');
+    headerCount.textContent = unreadCount === 1 ? '1 nova' : `${unreadCount} novas`;
+
+    $$('.notif-tab').forEach((t) =>
+      t.classList.toggle('active', t.dataset.notifFilter === state.notifFilter)
+    );
+
+    const list = state.notifications.filter(
+      (n) => state.notifFilter === 'all' || n.category === state.notifFilter
+    );
+
+    const container = $('#notificationsList');
+    if (list.length === 0) {
+      container.innerHTML = `<div style="padding:30px 16px;text-align:center;color:var(--text-muted);font-size:12.5px;">Nenhuma notificação nesta categoria.</div>`;
+      return;
+    }
+
+    container.innerHTML = list
+      .map((n) => {
+        const icon = n.category === 'alert' ? '⚠️' : '🎫';
+        return `
+          <button type="button" class="notif-item ${n.unread ? 'unread' : ''}" data-notif-id="${n.id}">
+            <span class="notif-icon ${escapeHtml(n.category)}">${icon}</span>
+            <div class="notif-content">
+              <div class="notif-title-row">
+                <span class="notif-title">${escapeHtml(n.title)}</span>
+                <span class="notif-time">${escapeHtml(n.time)}</span>
+              </div>
+              <div class="notif-msg">${escapeHtml(n.message)}</div>
+            </div>
+            ${n.unread ? '<span class="notif-unread-dot" aria-label="Não lida"></span>' : ''}
+          </button>
+        `;
+      })
+      .join('');
+
+    $$('[data-notif-id]').forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const item = state.notifications.find((x) => x.id === btn.dataset.notifId);
+        if (!item) return;
+        item.unread = false;
+        renderNotifications();
+        $('#notificationsPanel').classList.add('hidden');
+        $('#btnNotifications').setAttribute('aria-expanded', 'false');
+
+        if (item.convId) {
+          state.selectedConvId = item.convId;
+          state.tab = 'all';
+          state.statusFilter = 'open';
+          setView('conversations');
+        } else if (item.viewTarget) {
+          if (item.tabTarget) state.tab = item.tabTarget;
+          setView(item.viewTarget);
+        }
+      };
+    });
+  }
+
+  function pushNotification({ category = 'ticket', title, message, convId = null, viewTarget = null, tabTarget = null, silent = false }) {
+    state.notifications.unshift({
+      id: 'ntf_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
+      category,
+      title,
+      message,
+      time: `às ${nowTime()}`,
+      unread: true,
+      convId,
+      viewTarget,
+      tabTarget,
+    });
+    renderNotifications();
+    if (!silent) playNotificationChime();
+  }
+
+  function openManualModal(tab = 'start') {
+    state.manualTab = tab;
+    $$('.manual-tab').forEach((t) =>
+      t.classList.toggle('active', t.dataset.manualTab === tab)
+    );
+    $('#manualContent').innerHTML = MANUAL_SECTIONS[tab] || MANUAL_SECTIONS.start;
+    $('#manualModal').classList.remove('hidden');
+  }
+
+  // ========================================================================
   // NAVEGAÇÃO TOPBAR
   // ========================================================================
   function setView(viewName) {
@@ -91,7 +411,10 @@
     });
 
     if (viewName === 'conversations') renderConversations();
-    if (viewName === 'connections') renderConnections();
+    if (viewName === 'connections') {
+      state.connSubView = 'list';
+      renderConnections();
+    }
     if (viewName === 'contacts') renderContacts();
     if (viewName === 'reports') renderReports();
   }
@@ -113,7 +436,7 @@
   // VIEW 1: CONVERSAS
   // ========================================================================
   function getFilteredConversations() {
-    return state.conversations.filter((c) => {
+    const filtered = state.conversations.filter((c) => {
       if (state.statusFilter !== 'all' && c.status !== state.statusFilter) return false;
       if (state.tab === 'mine' && c.assignee !== DATA.currentAgent.id) return false;
       if (state.tab === 'queue' && c.assignee !== 'queue') return false;
@@ -124,10 +447,19 @@
           c.contact.name.toLowerCase().includes(q) ||
           c.contact.phone.toLowerCase().includes(q) ||
           c.connection.toLowerCase().includes(q) ||
-          c.department.toLowerCase().includes(q);
+          c.department.toLowerCase().includes(q) ||
+          (c.ticketNumber || '').toLowerCase().includes(q);
         if (!match) return false;
       }
       return true;
+    });
+
+    return [...filtered].sort((a, b) => {
+      if (state.convSort === 'oldest_first') return (a.createdTs || 0) - (b.createdTs || 0);
+      if (state.convSort === 'newest_first') return (b.createdTs || 0) - (a.createdTs || 0);
+      if (state.convSort === 'longest_wait') return (b.waitMinutes || 0) - (a.waitMinutes || 0);
+      if (state.convSort === 'shortest_wait') return (a.waitMinutes || 0) - (b.waitMinutes || 0);
+      return (b.lastMessageTs || 0) - (a.lastMessageTs || 0);
     });
   }
 
@@ -147,7 +479,19 @@
         .map((c) => {
           const last = [...c.messages].reverse().find((m) => m.type !== 'activity') || c.messages[c.messages.length - 1];
           const prefix = last?.type === 'outgoing' ? '✓✓ ' : last?.type === 'private' ? '🔒 ' : '';
-          const preview = last ? `${prefix}${last.text}` : '';
+          const attLabel = last?.attachment
+            ? {
+                document: `📄 ${last.attachment.name || 'Documento'}`,
+                image: '🖼️ Foto',
+                audio: `🎧 ${last.attachment.name || 'Áudio'}`,
+                contact: `👤 ${last.attachment.contactName || 'Contato'}`,
+                poll: `📊 Enquete: ${last.attachment.question || ''}`,
+                pix: `💠 Pix ${last.attachment.amount || ''}`,
+                event: `📅 ${last.attachment.title || 'Evento'}`,
+                sticker: 'Figurinha',
+              }[last.attachment.kind] || '📎 Anexo'
+            : '';
+          const preview = last ? `${prefix}${last.text || attLabel}` : '';
           return `
             <div class="conv-row ${c.id === state.selectedConvId ? 'active' : ''}" data-conv-id="${c.id}">
               <div class="avatar md">
@@ -159,6 +503,7 @@
                   <span class="conv-row-name">${escapeHtml(c.contact.name)}</span>
                   <span class="conv-row-time">${escapeHtml(c.updatedAt)}</span>
                 </div>
+                <div class="conv-ticket-tag">${escapeHtml(c.ticketNumber || '')}</div>
                 <div class="conv-row-bottom">
                   <span class="conv-row-preview">${escapeHtml(preview)}</span>
                   ${c.unread > 0 ? `<span class="unread-dot">${c.unread}</span>` : ''}
@@ -196,6 +541,7 @@
     const agLabel = conv.assignee === 'queue' ? 'Na Fila' : agObj ? agObj.name.replace(' (Você)', '') : 'Sem atendente';
 
     $('#chatHeaderPills').innerHTML = `
+      <span class="header-pill ticket">${escapeHtml(conv.ticketNumber || '')}</span>
       <span class="header-pill connection">${escapeHtml(conv.connection)}</span>
       <span class="header-pill dept">${escapeHtml(conv.department)}</span>
       <span class="header-pill agent">${escapeHtml(agLabel)}</span>
@@ -230,6 +576,67 @@
         const isOut = m.type === 'outgoing';
         const isPriv = m.type === 'private';
 
+        let attachHtml = '';
+        if (m.attachment) {
+          const att = m.attachment;
+          if (att.kind === 'image' && att.url) {
+            attachHtml = `<img class="msg-attach-img" src="${escapeHtml(att.url)}" alt="${escapeHtml(att.name || 'Imagem')}" />`;
+          } else if (att.kind === 'sticker') {
+            attachHtml = att.url
+              ? `<img class="msg-attach-img" style="max-width:130px;max-height:130px;" src="${escapeHtml(att.url)}" alt="Figurinha" />`
+              : `<div class="msg-sticker-glyph">${escapeHtml(att.glyph || '🚀')}</div>`;
+          } else if (att.kind === 'document') {
+            attachHtml = `
+              <div class="msg-attach-card">
+                <div class="msg-attach-title">📄 ${escapeHtml(att.name)}</div>
+                <div class="msg-attach-sub">${escapeHtml(att.size || 'Documento anexado')}</div>
+              </div>
+            `;
+          } else if (att.kind === 'audio') {
+            attachHtml = `
+              <div class="msg-attach-card">
+                <div class="msg-attach-title">🎧 ${escapeHtml(att.name || 'Mensagem de voz')}</div>
+                <div class="msg-audio-bar">
+                  <span>▶</span>
+                  <div class="msg-audio-wave"><span></span></div>
+                  <span class="msg-attach-sub">${escapeHtml(att.duration || '0:14')}</span>
+                </div>
+              </div>
+            `;
+          } else if (att.kind === 'contact') {
+            attachHtml = `
+              <div class="msg-attach-card">
+                <div class="msg-attach-title">👤 ${escapeHtml(att.contactName)}</div>
+                <div class="msg-attach-sub">${escapeHtml(att.contactPhone)}</div>
+              </div>
+            `;
+          } else if (att.kind === 'poll') {
+            attachHtml = `
+              <div class="msg-attach-card">
+                <div class="msg-attach-title">📊 ${escapeHtml(att.question)}</div>
+                ${(att.options || [])
+                  .map((opt) => `<div class="msg-poll-opt"><span>○ ${escapeHtml(opt)}</span><span>0%</span></div>`)
+                  .join('')}
+              </div>
+            `;
+          } else if (att.kind === 'pix') {
+            attachHtml = `
+              <div class="msg-attach-card">
+                <div class="msg-attach-title">💠 Cobrança Pix • ${escapeHtml(att.amount)}</div>
+                <div class="msg-attach-sub">Chave: ${escapeHtml(att.key)}</div>
+                ${att.desc ? `<div class="msg-attach-sub">${escapeHtml(att.desc)}</div>` : ''}
+              </div>
+            `;
+          } else if (att.kind === 'event') {
+            attachHtml = `
+              <div class="msg-attach-card">
+                <div class="msg-attach-title">📅 ${escapeHtml(att.title)}</div>
+                <div class="msg-attach-sub">${escapeHtml(att.when)}${att.location ? ' • ' + escapeHtml(att.location) : ''}</div>
+              </div>
+            `;
+          }
+        }
+
         return `
           <div class="msg-wrap ${m.type}">
             <div class="bubble">
@@ -238,7 +645,8 @@
                 <span class="bubble-time">${escapeHtml(m.time)}${isOut ? ' ✓✓' : ''}</span>
               </div>
               ${quoteHtml}
-              <div>${escapeHtml(m.text)}</div>
+              ${m.text ? `<div>${escapeHtml(m.text)}</div>` : ''}
+              ${attachHtml}
             </div>
           </div>
         `;
@@ -264,6 +672,7 @@
       </div>
     `;
 
+    $('#detailTicketNumber').textContent = conv.ticketNumber || 'Chamado';
     $('#selectAgent').innerHTML = DATA.agents
       .map((a) => `<option value="${a.id}" ${conv.assignee === a.id ? 'selected' : ''}>${a.name}</option>`)
       .join('');
@@ -293,8 +702,6 @@
         renderConversations();
       };
     });
-
-    $('#aiSummaryBox').textContent = conv.summary || 'Atendimento em andamento no SMV Sac.';
   }
 
   // ========================================================================
@@ -316,6 +723,8 @@
       time: nowTime(),
     });
     conv.updatedAt = nowTime();
+    conv.lastMessageTs = Date.now();
+    if (!state.privateMode) conv.waitMinutes = 0;
 
     if (!state.privateMode && conv.assignee === 'queue') {
       conv.assignee = DATA.currentAgent.id;
@@ -325,33 +734,6 @@
     input.style.height = 'auto';
     hideCanned();
     renderConversations();
-
-    if (!state.privateMode && conv.id === state.liveWidgetConvId) {
-      renderLiveWidget();
-      toast('Mensagem entregue no WebChat do cliente!');
-      return;
-    }
-
-    if (!state.privateMode && conv.autoCustomerReply && !conv._replied) {
-      conv._replied = true;
-      $('#typingText').textContent = `${conv.contact.name} está digitando...`;
-      $('#typingIndicator').classList.remove('hidden');
-
-      setTimeout(() => {
-        $('#typingIndicator').classList.add('hidden');
-        conv.messages.push({
-          id: 'c_' + Date.now(),
-          type: 'incoming',
-          sender: conv.contact.name,
-          text: conv.autoCustomerReply,
-          time: nowTime(),
-        });
-        conv.updatedAt = nowTime();
-        if (state.selectedConvId !== conv.id) conv.unread += 1;
-        renderConversations();
-        toast(`Nova mensagem de ${conv.contact.name}`);
-      }, 1500);
-    }
   }
 
   function showCanned(query = '') {
@@ -393,9 +775,166 @@
   }
 
   // ========================================================================
-  // VIEW 2: CONEXÕES (ESTILO DIGISAC)
+  // VIEW 2: CONEXÕES (ESTILO DIGISAC) + CATÁLOGO ADICIONAR CONEXÃO
   // ========================================================================
+  const CONNECTION_CATALOG = [
+    {
+      channel: 'WhatsApp',
+      title: 'WhatsApp',
+      slug: 'whatsapp',
+      placeholder: 'Ex: +55 11 99999-0000',
+      iconSvg:
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>',
+    },
+    {
+      channel: 'WebChat',
+      title: 'Webchat',
+      slug: 'webchat',
+      placeholder: 'Ex: WebChat • Site Oficial',
+      iconSvg:
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><circle cx="9" cy="10" r="1" fill="currentColor"/><circle cx="15" cy="10" r="1" fill="currentColor"/></svg>',
+    },
+    {
+      channel: 'Telegram',
+      title: 'Telegram',
+      slug: 'telegram',
+      placeholder: 'Ex: @smvsac_bot',
+      iconSvg:
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>',
+    },
+    {
+      channel: 'WhatsApp Business API',
+      title: 'WhatsApp Business API',
+      slug: 'whatsapp-api',
+      placeholder: 'Ex: +55 11 4000-1234 (Meta Cloud API)',
+      iconSvg:
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9"/><path d="M16 5h6"/><path d="M19 2v6"/></svg>',
+    },
+    {
+      channel: 'Instagram',
+      title: 'Instagram',
+      slug: 'instagram',
+      placeholder: 'Ex: @supermegavendas.oficial',
+      iconSvg:
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="5" ry="5"/><path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z"/><line x1="17.5" y1="6.5" x2="17.51" y2="6.5"/></svg>',
+    },
+    {
+      channel: 'Facebook Messenger',
+      title: 'Facebook Messenger',
+      slug: 'messenger',
+      placeholder: 'Ex: Página Super MegaVendas',
+      iconSvg:
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a10 10 0 0 0-8.6 15.1L2 22l5.1-1.3A10 10 0 1 0 12 2z"/><polyline points="8 14 11 10 13 12 16 9"/></svg>',
+    },
+    {
+      channel: 'Email',
+      title: 'Email',
+      slug: 'email',
+      placeholder: 'Ex: suporte@supermegavendas.com',
+      iconSvg:
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><polyline points="22,6 12,13 2,6"/></svg>',
+    },
+    {
+      channel: 'SMS',
+      title: 'SMS',
+      slug: 'sms',
+      placeholder: 'Ex: Shortcode 28900 / Gateway SMS',
+      iconSvg:
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M8 10h8"/><path d="M8 13h5"/></svg>',
+    },
+    {
+      channel: 'Reclame Aqui',
+      title: 'Reclame Aqui',
+      slug: 'reclame-aqui',
+      placeholder: 'Ex: ID Empresa Reclame Aqui',
+      iconSvg:
+        '<svg viewBox="0 0 24 24" fill="none"><text x="12" y="16" text-anchor="middle" font-size="11.5" font-weight="800" fill="currentColor" font-family="Inter, sans-serif">RA</text></svg>',
+    },
+  ];
+
+  function getChannelCatalogInfo(channel) {
+    return (
+      CONNECTION_CATALOG.find((item) => item.channel === channel) ||
+      CONNECTION_CATALOG[0]
+    );
+  }
+
+  function renderConnectionsCatalog() {
+    const grid = $('#connCatalogGrid');
+    grid.innerHTML = CONNECTION_CATALOG.map((item) => {
+      const quota = state.connQuotas[item.channel] ?? 0;
+      const used = state.connections.filter(
+        (c) => c.status === 'active' && c.channel === item.channel
+      ).length;
+      const available = Math.max(0, quota - used);
+      const isContracted = quota > 0;
+      const isLimitReached = isContracted && available === 0;
+      const canConfigure = isContracted && available > 0;
+
+      let statusHtml = '';
+      let descText = 'Contrate essa conexão para começar a usá-la.';
+      if (isLimitReached) {
+        statusHtml = `<span class="catalog-status limit"><i class="status-dot-sm"></i> Limite atingido</span>`;
+        descText = 'Você atingiu o limite contratado desta conexão.';
+      } else if (canConfigure) {
+        statusHtml = `<span class="catalog-status available">${available} ${available === 1 ? 'disponível' : 'disponíveis'}</span>`;
+        descText = 'Configure sua conta e comece a usar esta conexão.';
+      }
+
+      const iconClass = isContracted ? `catalog-icon active-${item.slug}` : 'catalog-icon';
+      const cardStateClass = canConfigure ? 'available' : 'locked';
+
+      return `
+        <button type="button" class="catalog-card ${cardStateClass}" data-catalog-channel="${escapeHtml(item.channel)}">
+          <div class="catalog-card-top">
+            <span class="${iconClass}">${item.iconSvg}</span>
+            ${statusHtml}
+          </div>
+          <div class="catalog-title">${escapeHtml(item.title)}</div>
+          <p class="catalog-desc">${escapeHtml(descText)}</p>
+        </button>
+      `;
+    }).join('');
+
+    $$('[data-catalog-channel]').forEach((card) => {
+      card.onclick = () => {
+        const channel = card.dataset.catalogChannel;
+        const quota = state.connQuotas[channel] ?? 0;
+        const used = state.connections.filter(
+          (c) => c.status === 'active' && c.channel === channel
+        ).length;
+        const available = Math.max(0, quota - used);
+
+        if (quota > 0 && available > 0) {
+          openConnectionFormModal(null, channel);
+        } else {
+          openUpgradeConnectionModal(channel, quota > 0);
+        }
+      };
+    });
+  }
+
+  function openUpgradeConnectionModal(channel, isLimitReached) {
+    state.upgradingChannel = channel;
+    const item = getChannelCatalogInfo(channel);
+    $('#upgradeConnTitle').textContent = isLimitReached
+      ? `Limite atingido — ${item.title}`
+      : `Contratar conexão — ${item.title}`;
+    $('#upgradeConnMessage').innerHTML = isLimitReached
+      ? `Você atingiu o limite atual contratado para <strong>${escapeHtml(item.title)}</strong>. Deseja liberar <strong>+1 vaga</strong> agora no plano para configurar uma nova conexão?`
+      : `A conexão <strong>${escapeHtml(item.title)}</strong> ainda não está habilitada no seu plano atual. Deseja habilitar <strong>1 vaga</strong> no plano para configurar agora?`;
+    $('#upgradeConnModal').classList.remove('hidden');
+  }
+
   function renderConnections() {
+    const isAddMode = state.connSubView === 'add';
+    $('#connectionsListView').classList.toggle('hidden', isAddMode);
+    $('#connectionsAddView').classList.toggle('hidden', !isAddMode);
+    if (isAddMode) {
+      renderConnectionsCatalog();
+      return;
+    }
+
     const activeTotal = state.connections.filter((c) => c.status === 'active').length;
     const archivedTotal = state.connections.filter((c) => c.status === 'archived').length;
     $('#connActiveCount').textContent = activeTotal;
@@ -411,16 +950,29 @@
       return true;
     });
 
+    const getConnStatusMeta = (c) => {
+      if (c.status === 'archived') return { cls: 'archived', label: 'Arquivada' };
+      if (c.sessionState === 'restarting') return { cls: 'restarting', label: 'Reiniciando...' };
+      if (c.sessionState === 'paused') return { cls: 'paused', label: 'Pausado' };
+      if (c.sessionState === 'disconnected') return { cls: 'disconnected', label: 'Desconectado' };
+      return { cls: '', label: 'Conectado' };
+    };
+
     const grid = $('#connectionsGrid');
     if (filtered.length === 0) {
       grid.innerHTML = `<div style="grid-column:1/-1;padding:40px;text-align:center;color:var(--text-muted);">Nenhuma conexão encontrada.</div>`;
     } else {
       grid.innerHTML = filtered
         .map((c) => {
-          const cls = c.channel.toLowerCase();
-          const icon = c.channel === 'WhatsApp' ? '💬' : c.channel === 'WebChat' ? '🌐' : '📸';
+          const chInfo = getChannelCatalogInfo(c.channel);
+          const cls = chInfo.slug;
+          const icon = chInfo.iconSvg;
+          const statusMeta = getConnStatusMeta(c);
+          const isMenuOpen = state.openConnMenuId === c.id;
+          const isPaused = c.sessionState === 'paused';
+          const isDisconnected = c.sessionState === 'disconnected';
           return `
-            <div class="conn-card">
+            <div class="conn-card ${isMenuOpen ? 'menu-open' : ''}">
               <div class="conn-card-head">
                 <div class="conn-brand-row">
                   <div class="conn-circle ${cls}">${icon}</div>
@@ -429,9 +981,62 @@
                     <div class="conn-channel">${escapeHtml(c.channel)}</div>
                   </div>
                 </div>
-                <button class="icon-btn" data-toggle-archive="${c.id}" title="${c.status === 'active' ? 'Arquivar conexão' : 'Reativar conexão'}">
-                  ⋮
-                </button>
+                <div class="conn-menu-wrap">
+                  <button
+                    type="button"
+                    class="icon-btn conn-menu-trigger"
+                    data-conn-menu-toggle="${c.id}"
+                    title="Mais opções"
+                    aria-haspopup="menu"
+                    aria-expanded="${isMenuOpen ? 'true' : 'false'}"
+                  >
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                      <circle cx="12" cy="5" r="2" />
+                      <circle cx="12" cy="12" r="2" />
+                      <circle cx="12" cy="19" r="2" />
+                    </svg>
+                  </button>
+                  <div class="conn-menu-dropdown ${isMenuOpen ? '' : 'hidden'}" role="menu">
+                    <button type="button" class="conn-menu-item" data-conn-action="view" data-conn-id="${c.id}">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                      <span>Visualizar</span>
+                    </button>
+                    <button type="button" class="conn-menu-item" data-conn-action="events" data-conn-id="${c.id}">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></svg>
+                      <span>Histórico de eventos</span>
+                    </button>
+                    <button type="button" class="conn-menu-item" data-conn-action="edit" data-conn-id="${c.id}">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                      <span>Editar</span>
+                    </button>
+                    <button type="button" class="conn-menu-item" data-conn-action="archive" data-conn-id="${c.id}">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+                      <span>${c.status === 'active' ? 'Arquivar' : 'Reativar'}</span>
+                    </button>
+
+                    <div class="conn-menu-divider"></div>
+
+                    <button type="button" class="conn-menu-item" data-conn-action="restart" data-conn-id="${c.id}">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>
+                      <span>Reiniciar</span>
+                    </button>
+                    <button type="button" class="conn-menu-item" data-conn-action="pause" data-conn-id="${c.id}">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+                      <span>${isPaused ? 'Retomar' : 'Pausar'}</span>
+                    </button>
+                    <button type="button" class="conn-menu-item" data-conn-action="disconnect" data-conn-id="${c.id}">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                      <span>${isDisconnected ? 'Reconectar' : 'Desconectar'}</span>
+                    </button>
+
+                    <div class="conn-menu-divider"></div>
+
+                    <button type="button" class="conn-menu-item danger" data-conn-action="delete" data-conn-id="${c.id}">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+                      <span>Excluir</span>
+                    </button>
+                  </div>
+                </div>
               </div>
               <div class="conn-card-body">
                 <div class="conn-meta-row">
@@ -447,14 +1052,10 @@
                   <span>${escapeHtml(c.department)}</span>
                 </div>
                 <div class="conn-status-row">
-                  <span class="status-pill ${c.status === 'archived' ? 'archived' : ''}">
-                    <i></i> ${c.status === 'active' ? 'Conectado' : 'Arquivada'}
+                  <span class="status-pill ${statusMeta.cls}">
+                    <i></i> ${statusMeta.label}
                   </span>
-                  ${
-                    c.channel === 'WebChat' && c.status === 'active'
-                      ? `<button class="conn-action-link" data-open-widget="1">Testar WebChat →</button>`
-                      : `<button class="conn-action-link" data-filter-conn="${escapeHtml(c.name)}">Ver fila →</button>`
-                  }
+                  <button class="conn-action-link" data-filter-conn="${escapeHtml(c.name)}">Ver fila →</button>
                 </div>
               </div>
             </div>
@@ -462,18 +1063,23 @@
         })
         .join('');
 
-      $$('[data-toggle-archive]').forEach((btn) => {
-        btn.onclick = () => {
-          const item = state.connections.find((x) => x.id === btn.dataset.toggleArchive);
-          if (!item) return;
-          item.status = item.status === 'active' ? 'archived' : 'active';
+      $$('[data-conn-menu-toggle]').forEach((btn) => {
+        btn.onclick = (e) => {
+          e.stopPropagation();
+          const id = btn.dataset.connMenuToggle;
+          state.openConnMenuId = state.openConnMenuId === id ? null : id;
           renderConnections();
-          toast(item.status === 'archived' ? `Conexão "${item.name}" arquivada` : `Conexão "${item.name}" reativada!`);
         };
       });
 
-      $$('[data-open-widget]').forEach((btn) => {
-        btn.onclick = () => openLiveWidget();
+      $$('[data-conn-action]').forEach((btn) => {
+        btn.onclick = (e) => {
+          e.stopPropagation();
+          const action = btn.dataset.connAction;
+          const id = btn.dataset.connId;
+          state.openConnMenuId = null;
+          handleConnectionAction(action, id);
+        };
       });
 
       $$('[data-filter-conn]').forEach((btn) => {
@@ -490,18 +1096,265 @@
     $('#connFooterCount').textContent = `Mostrando ${filtered.length} de ${totalInTab} resultados`;
   }
 
+  function pushConnectionEvent(conn, title, tone = 'info') {
+    if (!Array.isArray(conn.events)) conn.events = [];
+    conn.events.unshift({
+      title,
+      actor: DATA.currentAgent.name || 'Operador',
+      time: `Hoje às ${nowTime()}`,
+      tone,
+    });
+  }
+
+  function openConnectionFormModal(conn = null, presetChannel = null) {
+    state.editingConnId = conn ? conn.id : null;
+    const selectedChannel = conn ? conn.channel : presetChannel || 'WhatsApp';
+    const chInfo = getChannelCatalogInfo(selectedChannel);
+    $('#connModalTitle').textContent = conn
+      ? 'Editar Conexão'
+      : `Nova Conexão — ${chInfo.title}`;
+    $('#btnSaveAddConn').textContent = conn ? 'Salvar alterações' : 'Salvar conexão';
+    $('#newConnName').value = conn ? conn.name : '';
+    $('#newConnChannel').value = selectedChannel;
+    $('#newConnIdentifier').value = conn ? (conn.identifier === '-' ? '' : conn.identifier) : '';
+    $('#newConnIdentifier').placeholder = chInfo.placeholder;
+    $('#newConnBot').value = conn ? conn.bot : '-';
+    $('#newConnDept').value = conn ? conn.department : 'Suporte';
+    $('#addConnModal').classList.remove('hidden');
+    setTimeout(() => $('#newConnName').focus(), 20);
+  }
+
+  function openViewConnectionModal(conn) {
+    state.viewingConnId = conn.id;
+    const statusLabel =
+      conn.status === 'archived'
+        ? 'Arquivada'
+        : conn.sessionState === 'paused'
+          ? 'Pausado'
+          : conn.sessionState === 'disconnected'
+            ? 'Desconectado'
+            : conn.sessionState === 'restarting'
+              ? 'Reiniciando...'
+              : 'Conectado';
+
+    $('#viewConnTitle').textContent = `Conexão — ${conn.name}`;
+    $('#viewConnBody').innerHTML = `
+      <div class="conn-detail-grid">
+        <div class="conn-detail-item">
+          <span>Nome</span>
+          <strong>${escapeHtml(conn.name)}</strong>
+        </div>
+        <div class="conn-detail-item">
+          <span>Canal</span>
+          <strong>${escapeHtml(conn.channel)}</strong>
+        </div>
+        <div class="conn-detail-item full">
+          <span>Identificador / Número</span>
+          <strong>${escapeHtml(conn.identifier)}</strong>
+        </div>
+        <div class="conn-detail-item">
+          <span>Departamento padrão</span>
+          <strong>${escapeHtml(conn.department)}</strong>
+        </div>
+        <div class="conn-detail-item">
+          <span>Bot vinculado</span>
+          <strong>${escapeHtml(conn.bot)}</strong>
+        </div>
+        <div class="conn-detail-item">
+          <span>Status atual</span>
+          <strong>${escapeHtml(statusLabel)}</strong>
+        </div>
+        <div class="conn-detail-item">
+          <span>ID da conexão</span>
+          <strong>${escapeHtml(conn.id)}</strong>
+        </div>
+      </div>
+    `;
+    $('#viewConnModal').classList.remove('hidden');
+  }
+
+  function openEventsConnectionModal(conn) {
+    $('#eventsConnTitle').textContent = 'Histórico de eventos';
+    $('#eventsConnSubtitle').textContent = `${conn.name} • ${conn.channel} (${conn.identifier})`;
+    const events = Array.isArray(conn.events) ? conn.events : [];
+    $('#eventsConnList').innerHTML =
+      events.length === 0
+        ? `<div class="empty-hint">Nenhum evento registrado para esta conexão.</div>`
+        : events
+            .map(
+              (ev) => `
+                <div class="conn-event-row">
+                  <span class="conn-event-dot ${escapeHtml(ev.tone || 'info')}"></span>
+                  <div class="conn-event-content">
+                    <div class="conn-event-title">${escapeHtml(ev.title)}</div>
+                    <div class="conn-event-meta">${escapeHtml(ev.time)} • ${escapeHtml(ev.actor)}</div>
+                  </div>
+                </div>
+              `
+            )
+            .join('');
+    $('#eventsConnModal').classList.remove('hidden');
+  }
+
+  function openDeleteConnectionModal(conn) {
+    state.deletingConnId = conn.id;
+    $('#deleteConnMessage').innerHTML = `Tem certeza que deseja excluir permanentemente a conexão <strong>${escapeHtml(conn.name)}</strong> (${escapeHtml(conn.identifier)})? Esta ação não poderá ser desfeita.`;
+    $('#deleteConnModal').classList.remove('hidden');
+  }
+
+  function handleConnectionAction(action, id) {
+    const conn = state.connections.find((x) => x.id === id);
+    if (!conn) return;
+
+    if (action === 'view') {
+      renderConnections();
+      openViewConnectionModal(conn);
+      return;
+    }
+
+    if (action === 'events') {
+      renderConnections();
+      openEventsConnectionModal(conn);
+      return;
+    }
+
+    if (action === 'edit') {
+      renderConnections();
+      openConnectionFormModal(conn);
+      return;
+    }
+
+    if (action === 'archive') {
+      conn.status = conn.status === 'active' ? 'archived' : 'active';
+      if (conn.status === 'active' && conn.sessionState === 'disconnected') {
+        conn.sessionState = 'connected';
+      }
+      pushConnectionEvent(
+        conn,
+        conn.status === 'archived' ? 'Conexão arquivada' : 'Conexão reativada',
+        conn.status === 'archived' ? 'warning' : 'success'
+      );
+      renderConnections();
+      toast(conn.status === 'archived' ? `Conexão "${conn.name}" arquivada` : `Conexão "${conn.name}" reativada!`);
+      return;
+    }
+
+    if (action === 'restart') {
+      if (conn.status === 'archived') conn.status = 'active';
+      conn.sessionState = 'restarting';
+      pushConnectionEvent(conn, 'Reinicialização da sessão solicitada', 'warning');
+      renderConnections();
+      toast(`Reiniciando conexão "${conn.name}"...`);
+      setTimeout(() => {
+        const target = state.connections.find((x) => x.id === id);
+        if (!target) return;
+        target.sessionState = 'connected';
+        pushConnectionEvent(target, 'Conexão reiniciada e sincronizada com sucesso', 'success');
+        renderConnections();
+        toast(`Conexão "${target.name}" reiniciada e conectada!`);
+      }, 1100);
+      return;
+    }
+
+    if (action === 'pause') {
+      if (conn.sessionState === 'paused') {
+        conn.sessionState = 'connected';
+        pushConnectionEvent(conn, 'Atendimentos da conexão retomados', 'success');
+        toast(`Conexão "${conn.name}" retomada!`);
+      } else {
+        conn.sessionState = 'paused';
+        pushConnectionEvent(conn, 'Conexão pausada temporariamente', 'warning');
+        pushNotification({
+          category: 'alert',
+          title: `Conexão pausada — ${conn.name}`,
+          message: `A conexão ${conn.channel} (${conn.identifier}) foi pausada temporariamente.`,
+          viewTarget: 'connections',
+        });
+        toast(`Conexão "${conn.name}" pausada`);
+      }
+      renderConnections();
+      return;
+    }
+
+    if (action === 'disconnect') {
+      if (conn.sessionState === 'disconnected') {
+        conn.sessionState = 'connected';
+        pushConnectionEvent(conn, 'Sessão reconectada manualmente', 'success');
+        toast(`Conexão "${conn.name}" reconectada!`);
+      } else {
+        conn.sessionState = 'disconnected';
+        pushConnectionEvent(conn, 'Sessão desconectada manualmente', 'danger');
+        pushNotification({
+          category: 'alert',
+          title: `Conexão desconectada — ${conn.name}`,
+          message: `A sessão ${conn.channel} (${conn.identifier}) foi desconectada.`,
+          viewTarget: 'connections',
+        });
+        toast(`Conexão "${conn.name}" desconectada`);
+      }
+      renderConnections();
+      return;
+    }
+
+    if (action === 'delete') {
+      renderConnections();
+      openDeleteConnectionModal(conn);
+    }
+  }
+
   // ========================================================================
   // VIEW 3: CONTATOS
   // ========================================================================
+  function getFilteredContacts() {
+    const q = ($('#contactsSearchInput').value || '').trim().toLowerCase();
+    return state.conversations.filter((c) => {
+      if (state.contactsConnFilter !== 'all' && c.connection !== state.contactsConnFilter) return false;
+      if (state.contactsDeptFilter !== 'all' && c.department !== state.contactsDeptFilter) return false;
+      if (state.contactsLabelFilter !== 'all' && !(c.labels || []).includes(state.contactsLabelFilter)) return false;
+      if (q) {
+        const match =
+          c.contact.name.toLowerCase().includes(q) ||
+          (c.contact.role || '').toLowerCase().includes(q) ||
+          (c.contact.phone || '').toLowerCase().includes(q) ||
+          (c.contact.email || '').toLowerCase().includes(q) ||
+          (c.connection || '').toLowerCase().includes(q);
+        if (!match) return false;
+      }
+      return true;
+    });
+  }
+
   function renderContacts() {
-    const q = ($('#contactsSearchInput').value || '').toLowerCase();
-    const list = state.conversations.filter(
-      (c) =>
-        !q ||
-        c.contact.name.toLowerCase().includes(q) ||
-        c.contact.phone.toLowerCase().includes(q) ||
-        c.contact.email.toLowerCase().includes(q)
-    );
+    const connSelect = $('#contactsConnFilter');
+    const uniqueConns = [...new Set(state.connections.map((c) => c.name))];
+    connSelect.innerHTML = [
+      '<option value="all">Conexão: Todas</option>',
+      ...uniqueConns.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`),
+    ].join('');
+    connSelect.value = uniqueConns.includes(state.contactsConnFilter) ? state.contactsConnFilter : 'all';
+
+    const activeFiltersCount =
+      (($('#contactsSearchInput').value || '').trim() ? 1 : 0) +
+      (state.contactsConnFilter !== 'all' ? 1 : 0) +
+      (state.contactsDeptFilter !== 'all' ? 1 : 0) +
+      (state.contactsLabelFilter !== 'all' ? 1 : 0);
+
+    const badge = $('#contactsFilterBadge');
+    badge.textContent = activeFiltersCount;
+    badge.classList.toggle('hidden', activeFiltersCount === 0);
+
+    const list = getFilteredContacts();
+
+    if (list.length === 0) {
+      $('#contactsTableBody').innerHTML = `
+        <tr>
+          <td colspan="5" style="text-align:center;padding:36px 16px;color:var(--text-muted);">
+            Nenhum contato encontrado com os filtros aplicados.
+          </td>
+        </tr>
+      `;
+      return;
+    }
 
     $('#contactsTableBody').innerHTML = list
       .map(
@@ -606,110 +1459,6 @@
   }
 
   // ========================================================================
-  // VIEW 5: SANDBOX IA
-  // ========================================================================
-  function runAiSandbox(question) {
-    const q = question.trim();
-    if (!q) return;
-    const low = q.toLowerCase();
-    let reply = 'Recebi sua dúvida! Posso resolver automaticamente ou direcionar para o departamento ideal no SMV Sac.';
-    let tag = '✨ Resposta automática';
-
-    if (low.includes('pix') || low.includes('boleto')) {
-      reply = 'Você pode emitir a 2ª via ou gerar o QR Code PIX direto em financeiro.smvsac.com.br com baixa imediata.';
-    } else if (low.includes('horário') || low.includes('suporte')) {
-      reply = 'Nosso suporte humano atende de segunda a sexta, das 8h às 18h, e a IA do SMV Sac responde 24h por dia!';
-    } else if (low.includes('contrato') || low.includes('humano') || low.includes('atendente')) {
-      tag = '⚡ Transferência para humano';
-      reply = 'Perfeito! Já estou transferindo seu atendimento para um especialista com todo o resumo da conversa.';
-    }
-
-    $('#aiSandboxLog').innerHTML = `
-      <div class="lw-bubble visitor">${escapeHtml(q)}</div>
-      <div class="lw-bubble agent" style="border-color:var(--border-yellow);">
-        <div style="font-size:10.5px;font-weight:800;color:var(--yellow-400);margin-bottom:4px;">${tag}</div>
-        <div>${escapeHtml(reply)}</div>
-      </div>
-    `;
-  }
-
-  // ========================================================================
-  // SIMULADOR LIVE WIDGET (WEBCHAT)
-  // ========================================================================
-  function ensureLiveWidgetConv() {
-    let conv = state.conversations.find((c) => c.id === state.liveWidgetConvId);
-    if (!conv) {
-      conv = {
-        id: 500 + state.conversations.length,
-        status: 'open',
-        assignee: 'queue',
-        connection: 'Atendimento',
-        channel: 'WebChat',
-        department: 'Suporte',
-        unread: 0,
-        updatedAt: nowTime(),
-        labels: ['Suporte'],
-        contact: {
-          name: 'Visitante WebChat (Ao Vivo)',
-          initials: 'VW',
-          role: 'Cliente via Site • SMV Sac',
-          phone: 'WebChat',
-          email: 'visitante@site.com.br',
-        },
-        summary: 'Conversa iniciada ao vivo pelo simulador do WebChat.',
-        aiSuggestedReply: 'Olá! Que bom falar com você pelo WebChat do SMV Sac. Como posso ajudar hoje?',
-        messages: [
-          {
-            id: 'lw_0',
-            type: 'outgoing',
-            sender: 'SMV Sac',
-            text: 'Olá! 🚀 Bem-vindo ao SMV Sac. Envie uma mensagem aqui e ela aparecerá ao vivo na tela de Conversas!',
-            time: nowTime(),
-          },
-        ],
-      };
-      state.liveWidgetConvId = conv.id;
-      state.conversations.unshift(conv);
-    }
-    return conv;
-  }
-
-  function renderLiveWidget() {
-    const conv = ensureLiveWidgetConv();
-    const box = $('#lwMessages');
-    box.innerHTML = conv.messages
-      .filter((m) => m.type === 'incoming' || m.type === 'outgoing')
-      .map((m) => `<div class="lw-bubble ${m.type === 'incoming' ? 'visitor' : 'agent'}">${escapeHtml(m.text)}</div>`)
-      .join('');
-    box.scrollTop = box.scrollHeight;
-  }
-
-  function openLiveWidget() {
-    ensureLiveWidgetConv();
-    renderLiveWidget();
-    $('#liveWidgetModal').classList.remove('hidden');
-    setTimeout(() => $('#lwInput').focus(), 30);
-  }
-
-  function sendFromLiveWidget() {
-    const input = $('#lwInput');
-    const text = input.value.trim();
-    if (!text) return;
-    const conv = ensureLiveWidgetConv();
-    conv.messages.push({ id: 'lw_' + Date.now(), type: 'incoming', sender: conv.contact.name, text, time: nowTime() });
-    conv.status = 'open';
-    conv.updatedAt = nowTime();
-    input.value = '';
-    renderLiveWidget();
-
-    state.selectedConvId = conv.id;
-    state.tab = 'all';
-    state.statusFilter = 'open';
-    setView('conversations');
-    toast('💬 Mensagem recebida do WebChat!');
-  }
-
-  // ========================================================================
   // BUSCA RÁPIDA (CTRL + K)
   // ========================================================================
   function renderCommandBar(query = '') {
@@ -718,10 +1467,8 @@
       { label: 'Ir para Conexões', cat: 'Tela', run: () => setView('connections') },
       { label: 'Ir para Contatos', cat: 'Tela', run: () => setView('contacts') },
       { label: 'Ir para Relatórios', cat: 'Tela', run: () => setView('reports') },
-      { label: 'Ir para Assistente IA', cat: 'Tela', run: () => setView('ai') },
-      { label: 'Abrir Simulador WebChat', cat: 'Demo', run: () => openLiveWidget() },
       ...state.conversations.map((c) => ({
-        label: c.contact.name,
+        label: `${c.contact.name} (${c.ticketNumber || ''})`,
         cat: c.connection,
         run: () => {
           state.selectedConvId = c.id;
@@ -761,12 +1508,112 @@
       btn.addEventListener('click', () => setView(btn.dataset.view));
     });
 
-    // Status agente
-    $('#agentStatusToggle').addEventListener('click', () => {
-      state.agentStatusIndex = (state.agentStatusIndex + 1) % AGENT_STATUSES.length;
-      const st = AGENT_STATUSES[state.agentStatusIndex];
+    // Sincronização do perfil do usuário e disponibilidade
+    const syncUserProfileUI = () => {
+      const u = state.currentUser;
+      const parts = (u.name || 'RA').trim().split(/\s+/);
+      const initials = ((parts[0]?.[0] || 'S') + (parts[1]?.[0] || parts[0]?.[1] || 'M')).toUpperCase();
+      DATA.currentAgent.name = u.name;
+      DATA.currentAgent.initials = initials;
+      const selfAgent = DATA.agents.find((a) => a.id === DATA.currentAgent.id);
+      if (selfAgent) {
+        selfAgent.name = `${u.name} (${u.role === 'Admin' ? 'Admin' : 'Você'})`;
+      }
+      $('#agentAvatarInitials').textContent = initials;
+      $('#profileMenuUserName').textContent = u.name;
+      $('#btnCopySubdomain').textContent = u.subdomain;
+      $('#aboutSubdomainVal').textContent = u.subdomain;
+
+      const st = AGENT_STATUSES[state.agentStatusIndex] || AGENT_STATUSES[0];
       $('#agentStatusDot').className = `status-dot ${st.key}`;
-      toast(`Status: ${st.label}`);
+      $('#profileStatusDot').className = `profile-status-dot ${st.key}`;
+      $('#profileStatusText').textContent = st.label;
+    };
+
+    const closeAccountModal = () => $('#accountModal').classList.add('hidden');
+    const closeAboutModal = () => $('#aboutModal').classList.add('hidden');
+
+    // Abrir submenu do usuário ao clicar nas iniciais
+    $('#agentStatusToggle').addEventListener('click', (e) => {
+      e.stopPropagation();
+      const willOpen = $('#userProfileMenu').classList.contains('hidden');
+      closeTopbarPopovers();
+      if (willOpen) {
+        syncUserProfileUI();
+        $('#userProfileMenu').classList.remove('hidden');
+        $('#agentStatusToggle').setAttribute('aria-expanded', 'true');
+      }
+    });
+
+    $('#userProfileMenu').addEventListener('click', (e) => e.stopPropagation());
+
+    $('#btnProfileCycleStatus').addEventListener('click', () => {
+      state.agentStatusIndex = (state.agentStatusIndex + 1) % AGENT_STATUSES.length;
+      syncUserProfileUI();
+      toast(`Status: ${AGENT_STATUSES[state.agentStatusIndex].label}`);
+    });
+
+    $('#btnCopySubdomain').addEventListener('click', () => {
+      const sub = state.currentUser.subdomain || 'supermegavendas';
+      if (navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(`${sub}.smvsac.com.br`).catch(() => {});
+      }
+      toast(`Subdomínio copiado: ${sub}`);
+    });
+
+    $('#btnProfileAccount').addEventListener('click', () => {
+      closeTopbarPopovers();
+      $('#accNameInput').value = state.currentUser.name;
+      $('#accEmailInput').value = state.currentUser.email;
+      $('#accRoleInput').value = state.currentUser.role;
+      $('#accSubdomainInput').value = state.currentUser.subdomain;
+      $('#accStatusSelect').value = AGENT_STATUSES[state.agentStatusIndex]?.key || 'online';
+      $('#accountModal').classList.remove('hidden');
+      setTimeout(() => $('#accNameInput').focus(), 20);
+    });
+
+    $('#btnCloseAccountModal').addEventListener('click', closeAccountModal);
+    $('#btnCancelAccountModal').addEventListener('click', closeAccountModal);
+    $('#accountModal').addEventListener('click', (e) => {
+      if (e.target === $('#accountModal')) closeAccountModal();
+    });
+    $('#btnSaveAccountModal').addEventListener('click', () => {
+      const name = $('#accNameInput').value.trim();
+      const email = $('#accEmailInput').value.trim();
+      const subdomain = $('#accSubdomainInput').value.trim().toLowerCase().replace(/[^a-z0-9-]/g, '') || 'supermegavendas';
+      if (!name) {
+        toast('Informe seu nome completo');
+        return;
+      }
+      state.currentUser.name = name;
+      if (email) state.currentUser.email = email;
+      state.currentUser.subdomain = subdomain;
+      const statusIdx = AGENT_STATUSES.findIndex((s) => s.key === $('#accStatusSelect').value);
+      if (statusIdx >= 0) state.agentStatusIndex = statusIdx;
+      syncUserProfileUI();
+      closeAccountModal();
+      toast('Dados da conta atualizados!');
+    });
+
+    $('#btnProfileAbout').addEventListener('click', () => {
+      closeTopbarPopovers();
+      syncUserProfileUI();
+      $('#aboutModal').classList.remove('hidden');
+    });
+    $('#btnCloseAboutModal').addEventListener('click', closeAboutModal);
+    $('#btnOkAboutModal').addEventListener('click', closeAboutModal);
+    $('#aboutModal').addEventListener('click', (e) => {
+      if (e.target === $('#aboutModal')) closeAboutModal();
+    });
+    $('#btnAboutOpenLgpd').addEventListener('click', () => {
+      closeAboutModal();
+      state.pendingUser = null;
+      openLgpdModal();
+    });
+
+    $('#btnProfileLogout').addEventListener('click', () => {
+      closeTopbarPopovers();
+      $('#btnLogout').click();
     });
 
     // Conversas filtros & abas
@@ -787,37 +1634,255 @@
       renderConversations();
     });
 
-    // Nova conversa simulada
-    $('#btnNewConversation').addEventListener('click', () => {
-      const id = 600 + state.conversations.length;
+    // Recolher / expandir lista de conversas
+    const syncConvSidebar = () => {
+      $('#convSidebar').classList.toggle('collapsed', state.convSidebarCollapsed);
+      $('#btnExpandConvSidebar').classList.toggle('hidden', !state.convSidebarCollapsed);
+    };
+    $('#btnToggleConvSidebar').addEventListener('click', () => {
+      state.convSidebarCollapsed = true;
+      syncConvSidebar();
+    });
+    $('#btnExpandConvSidebar').addEventListener('click', () => {
+      state.convSidebarCollapsed = false;
+      syncConvSidebar();
+    });
+
+    // Menus + (Adicionar contato / grupo) e ⋮ (Ordenar por)
+    const closeConvMenus = () => {
+      $('#convAddMenu').classList.add('hidden');
+      $('#convSortMenu').classList.add('hidden');
+      $('#btnConvAddMenu').setAttribute('aria-expanded', 'false');
+      $('#btnConvSortMenu').setAttribute('aria-expanded', 'false');
+    };
+
+    const populateConnOptions = (selectEl) => {
+      const actives = state.connections.filter((c) => c.status === 'active');
+      const source = actives.length > 0 ? actives : state.connections;
+      selectEl.innerHTML = source
+        .map((c) => `<option value="${escapeHtml(c.name)}" data-channel="${escapeHtml(c.channel)}">${escapeHtml(c.name)} (${escapeHtml(c.channel)})</option>`)
+        .join('');
+    };
+
+    const closeAddContactConvModal = () => $('#addContactConvModal').classList.add('hidden');
+    const closeAddGroupConvModal = () => $('#addGroupConvModal').classList.add('hidden');
+
+    $('#btnConvAddMenu').addEventListener('click', (e) => {
+      e.stopPropagation();
+      const willOpen = $('#convAddMenu').classList.contains('hidden');
+      closeConvMenus();
+      if (willOpen) {
+        $('#convAddMenu').classList.remove('hidden');
+        $('#btnConvAddMenu').setAttribute('aria-expanded', 'true');
+      }
+    });
+
+    $('#btnConvSortMenu').addEventListener('click', (e) => {
+      e.stopPropagation();
+      const willOpen = $('#convSortMenu').classList.contains('hidden');
+      closeConvMenus();
+      if (willOpen) {
+        $('#convSortMenu').classList.remove('hidden');
+        $('#btnConvSortMenu').setAttribute('aria-expanded', 'true');
+      }
+    });
+
+    $('#btnActionAddContact').addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeConvMenus();
+      state.contactModalSource = 'conversations';
+      populateConnOptions($('#newContactConvConn'));
+      $('#newContactConvName').value = '';
+      $('#newContactConvPhone').value = '';
+      $('#newContactConvEmail').value = '';
+      $('#newContactConvMsg').value = '';
+      $('#addContactConvModal').classList.remove('hidden');
+      setTimeout(() => $('#newContactConvName').focus(), 20);
+    });
+
+    $('#btnActionAddGroup').addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeConvMenus();
+      populateConnOptions($('#newGroupConvConn'));
+      $('#newGroupConvName').value = '';
+      $('#newGroupConvMembers').value = '';
+      $('#newGroupConvMsg').value = '';
+      $('#addGroupConvModal').classList.remove('hidden');
+      setTimeout(() => $('#newGroupConvName').focus(), 20);
+    });
+
+    const SORT_LABELS = {
+      last_message_desc: 'Mensagem mais recente',
+      oldest_first: 'Mais antigos',
+      newest_first: 'Mais recentes',
+      longest_wait: 'Maior tempo de espera',
+      shortest_wait: 'Menor tempo de espera',
+    };
+
+    $$('.conv-sort-item').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const sortKey = btn.dataset.convSort;
+        state.convSort = sortKey;
+        $$('.conv-sort-item').forEach((item) => {
+          const active = item.dataset.convSort === sortKey;
+          item.classList.toggle('active', active);
+          item.setAttribute('aria-checked', active ? 'true' : 'false');
+        });
+        closeConvMenus();
+        renderConversations();
+        toast(`Ordenado por: ${SORT_LABELS[sortKey] || sortKey}`);
+      });
+    });
+
+    // Modal Adicionar Contato
+    $('#btnCloseAddContactConv').addEventListener('click', closeAddContactConvModal);
+    $('#btnCancelAddContactConv').addEventListener('click', closeAddContactConvModal);
+    $('#addContactConvModal').addEventListener('click', (e) => {
+      if (e.target === $('#addContactConvModal')) closeAddContactConvModal();
+    });
+    $('#btnSaveAddContactConv').addEventListener('click', () => {
+      const name = $('#newContactConvName').value.trim();
+      const phone = $('#newContactConvPhone').value.trim();
+      if (!name) {
+        toast('Informe o nome do contato');
+        return;
+      }
+      const connSelect = $('#newContactConvConn');
+      const connName = connSelect.value || 'SUPER MEGAVENDAS';
+      const channel = connSelect.selectedOptions?.[0]?.dataset?.channel || 'WhatsApp';
+      const dept = $('#newContactConvDept').value || 'Suporte';
+      const email = $('#newContactConvEmail').value.trim() || '-';
+      const firstMsg = $('#newContactConvMsg').value.trim() || 'Olá! Iniciando atendimento por aqui.';
+
+      const parts = name.split(/\s+/);
+      const initials = ((parts[0]?.[0] || 'C') + (parts[1]?.[0] || parts[0]?.[1] || 'T')).toUpperCase();
+      const id = 600 + Date.now() % 100000;
+      const now = Date.now();
+
       state.conversations.unshift({
         id,
+        ticketNumber: generateTicketNumber(),
         status: 'open',
-        assignee: 'queue',
-        connection: 'SUPER MEGAVENDAS',
-        channel: 'WhatsApp',
-        department: 'Suporte',
-        unread: 1,
+        assignee: DATA.currentAgent.id,
+        connection: connName,
+        channel,
+        department: dept,
+        unread: 0,
         updatedAt: nowTime(),
-        labels: ['Suporte'],
+        createdTs: now,
+        lastMessageTs: now,
+        waitMinutes: 0,
+        labels: [dept],
         contact: {
-          name: `Novo Cliente #${state.conversations.length + 1}`,
-          initials: 'NC',
-          role: 'Atendimento WhatsApp',
-          phone: '+55 (11) 99001-2244',
-          email: 'cliente@empresa.com.br',
+          name,
+          initials,
+          role: `Contato • ${channel}`,
+          phone: phone || 'Não informado',
+          email,
         },
-        summary: 'Cliente entrou na fila solicitando atendimento rápido.',
-        aiSuggestedReply: 'Olá! Seja bem-vindo ao SMV Sac. Em que posso ajudar você agora?',
-        autoCustomerReply: 'Ótimo, obrigado pelo retorno rápido!',
+        summary: `Contato ${name} adicionado manualmente no departamento ${dept}.`,
+        aiSuggestedReply: `Olá ${parts[0] || name}! Tudo bem? Como posso ajudar você hoje?`,
+        autoCustomerReply: 'Olá! Recebi sua mensagem, obrigado pelo contato!',
         messages: [
-          { id: 'n_' + Date.now(), type: 'incoming', sender: `Novo Cliente #${state.conversations.length + 1}`, text: 'Olá! Preciso de uma ajuda rápida com meu cadastro.', time: nowTime() },
+          {
+            id: 'c_' + now,
+            type: 'outgoing',
+            sender: DATA.currentAgent.name,
+            text: firstMsg,
+            time: nowTime(),
+          },
         ],
       });
-      state.tab = 'queue';
+
+      state.tab = 'mine';
+      state.statusFilter = 'open';
       state.selectedConvId = id;
+      closeAddContactConvModal();
+      if (state.contactModalSource === 'contacts') {
+        renderContacts();
+        updateGlobalCounts();
+        toast(`Contato "${name}" cadastrado com sucesso!`);
+      } else {
+        renderConversations();
+        toast(`Contato "${name}" adicionado e conversa iniciada!`);
+      }
+    });
+
+    // Modal Adicionar Grupo
+    $('#btnCloseAddGroupConv').addEventListener('click', closeAddGroupConvModal);
+    $('#btnCancelAddGroupConv').addEventListener('click', closeAddGroupConvModal);
+    $('#addGroupConvModal').addEventListener('click', (e) => {
+      if (e.target === $('#addGroupConvModal')) closeAddGroupConvModal();
+    });
+    $('#btnSaveAddGroupConv').addEventListener('click', () => {
+      const groupName = $('#newGroupConvName').value.trim();
+      const membersRaw = $('#newGroupConvMembers').value.trim();
+      if (!groupName) {
+        toast('Informe o nome do grupo');
+        return;
+      }
+      const connSelect = $('#newGroupConvConn');
+      const connName = connSelect.value || 'SUPER MEGAVENDAS';
+      const channel = connSelect.selectedOptions?.[0]?.dataset?.channel || 'WhatsApp';
+      const dept = $('#newGroupConvDept').value || 'Suporte';
+      const welcomeMsg =
+        $('#newGroupConvMsg').value.trim() ||
+        `Grupo "${groupName}" criado com sucesso.`;
+      const memberCount = membersRaw
+        ? membersRaw.split(',').map((s) => s.trim()).filter(Boolean).length
+        : 2;
+
+      const id = 700 + Date.now() % 100000;
+      const now = Date.now();
+
+      state.conversations.unshift({
+        id,
+        ticketNumber: generateTicketNumber(),
+        status: 'open',
+        assignee: DATA.currentAgent.id,
+        connection: connName,
+        channel,
+        department: dept,
+        unread: 0,
+        updatedAt: nowTime(),
+        createdTs: now,
+        lastMessageTs: now,
+        waitMinutes: 0,
+        labels: ['Suporte'],
+        contact: {
+          name: `Grupo: ${groupName}`,
+          initials: 'GR',
+          role: `Grupo (${memberCount} participantes) • ${channel}`,
+          phone: membersRaw || `${memberCount} participantes`,
+          email: '-',
+        },
+        summary: `Grupo "${groupName}" criado para atendimento colaborativo (${memberCount} participantes).`,
+        aiSuggestedReply: `Olá pessoal do grupo ${groupName}! Estamos à disposição por aqui.`,
+        autoCustomerReply: 'Perfeito! Todos no grupo receberam a mensagem.',
+        messages: [
+          {
+            id: 'g_act_' + now,
+            type: 'activity',
+            text: `Grupo "${groupName}" criado por ${DATA.currentAgent.name}`,
+            time: nowTime(),
+          },
+          {
+            id: 'g_' + now,
+            type: 'outgoing',
+            sender: DATA.currentAgent.name,
+            text: welcomeMsg,
+            time: nowTime(),
+          },
+        ],
+      });
+
+      state.tab = 'mine';
+      state.statusFilter = 'open';
+      state.selectedConvId = id;
+      closeAddGroupConvModal();
       renderConversations();
-      toast('Nova conversa adicionada à Fila!');
+      toast(`Grupo "${groupName}" criado!`);
     });
 
     // Header do chat
@@ -836,16 +1901,128 @@
       renderActiveChat();
     });
 
-    $('#btnTransferQuick').addEventListener('click', () => {
+    // Modal Transferir Chamado (para departamento e/ou atendente do mesmo domínio)
+    const getDomainAgents = () => {
+      const list = [...DATA.agents];
+      try {
+        const saved = JSON.parse(localStorage.getItem('smv_sac_users') || '[]');
+        if (Array.isArray(saved)) {
+          saved.forEach((u) => {
+            if (!u?.email || !u?.name) return;
+            const agId = 'usr_' + u.email.toLowerCase().replace(/[^a-z0-9]/g, '_');
+            if (!list.some((a) => a.id === agId) && u.name.toLowerCase() !== DATA.currentAgent.name.toLowerCase()) {
+              list.push({ id: agId, name: `${u.name} (${u.email})` });
+              if (!DATA.agents.some((a) => a.id === agId)) {
+                DATA.agents.push({ id: agId, name: u.name });
+              }
+            }
+          });
+        }
+      } catch {}
+      return list;
+    };
+
+    const closeTransferModal = () => {
+      $('#transferTicketModal').classList.add('hidden');
+      $('#transferDeptError').classList.add('hidden');
+      $('#transferDeptWrap').classList.remove('has-error');
+    };
+
+    const openTransferModal = () => {
       const conv = getSelectedConv();
-      if (conv.assignee === DATA.currentAgent.id) {
-        conv.assignee = 'queue';
-        toast('Conversa devolvida para a Fila');
-      } else {
-        conv.assignee = DATA.currentAgent.id;
-        toast('Atendimento assumido por você!');
+      if (!conv) return;
+
+      $('#transferTicketMeta').textContent = `${conv.ticketNumber || 'Chamado'} • ${conv.contact.name}`;
+
+      // Popula departamentos
+      $('#transferDeptSelect').innerHTML = [
+        '<option value="">Selecione</option>',
+        ...DATA.departments.map((d) => `<option value="${escapeHtml(d)}">${escapeHtml(d)}</option>`),
+      ].join('');
+      $('#transferDeptSelect').value = '';
+      $('#transferDeptError').classList.add('hidden');
+      $('#transferDeptWrap').classList.remove('has-error');
+
+      // Popula atendentes da rede do mesmo domínio
+      const domainAgents = getDomainAgents();
+      $('#transferAgentSelect').innerHTML = domainAgents
+        .map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)}</option>`)
+        .join('');
+      // Seleciona um colega da rede por padrão (ex.: Ozaniele) se disponível, ou Na Fila
+      const defaultColleague = domainAgents.find((a) => a.id === 'ozaniele') || domainAgents[0];
+      $('#transferAgentSelect').value = defaultColleague ? defaultColleague.id : 'queue';
+
+      $('#transferCommentInput').value = '';
+      $('#transferTicketModal').classList.remove('hidden');
+      setTimeout(() => $('#transferDeptSelect').focus(), 20);
+    };
+
+    $('#btnTransferQuick').addEventListener('click', openTransferModal);
+    $('#btnCancelTransfer').addEventListener('click', closeTransferModal);
+    $('#transferTicketModal').addEventListener('click', (e) => {
+      if (e.target === $('#transferTicketModal')) closeTransferModal();
+    });
+
+    $('#transferDeptSelect').addEventListener('change', () => {
+      if ($('#transferDeptSelect').value) {
+        $('#transferDeptError').classList.add('hidden');
+        $('#transferDeptWrap').classList.remove('has-error');
       }
+    });
+
+    $('#btnSaveTransfer').addEventListener('click', () => {
+      const conv = getSelectedConv();
+      if (!conv) return;
+
+      const dept = $('#transferDeptSelect').value;
+      if (!dept) {
+        $('#transferDeptError').classList.remove('hidden');
+        $('#transferDeptWrap').classList.add('has-error');
+        $('#transferDeptSelect').focus();
+        return;
+      }
+
+      const targetAgentId = $('#transferAgentSelect').value || 'queue';
+      const comment = $('#transferCommentInput').value.trim();
+      const targetAgent =
+        DATA.agents.find((a) => a.id === targetAgentId) || { id: 'queue', name: 'Fila do departamento' };
+
+      conv.department = dept;
+      conv.assignee = targetAgentId;
+      conv.updatedAt = nowTime();
+      conv.lastMessageTs = Date.now();
+
+      const destLabel =
+        targetAgentId === 'queue' ? `${dept} (Fila)` : `${targetAgent.name} (${dept})`;
+
+      conv.messages.push({
+        id: 'trf_' + Date.now(),
+        type: 'activity',
+        text: `${conv.ticketNumber || 'Chamado'} transferido para ${destLabel} por ${DATA.currentAgent.name}`,
+        time: nowTime(),
+      });
+
+      if (comment) {
+        conv.messages.push({
+          id: 'trf_note_' + Date.now(),
+          type: 'private',
+          sender: `${DATA.currentAgent.name} (Transferência)`,
+          text: comment,
+          time: nowTime(),
+        });
+      }
+
+      pushNotification({
+        category: 'ticket',
+        title: `${conv.ticketNumber || 'Chamado'} transferido`,
+        message: `${conv.contact.name} encaminhado para ${destLabel}.`,
+        convId: conv.id,
+        silent: true,
+      });
+
+      closeTransferModal();
       renderConversations();
+      toast(`${conv.ticketNumber || 'Chamado'} transferido para ${destLabel}!`);
     });
 
     $('#btnToggleDrawer').addEventListener('click', () => $('#detailsDrawer').classList.toggle('hidden'));
@@ -864,7 +2041,7 @@
       toast(conv.status === 'resolved' ? 'Atendimento finalizado ✓' : 'Atendimento reaberto');
     });
 
-    // Drawer selects & IA
+    // Drawer selects
     $('#selectAgent').addEventListener('change', (e) => {
       getSelectedConv().assignee = e.target.value;
       renderConversations();
@@ -872,11 +2049,6 @@
     $('#selectDept').addEventListener('change', (e) => {
       getSelectedConv().department = e.target.value;
       renderConversations();
-    });
-    $('#btnDrawerAiReply').addEventListener('click', () => {
-      $('#composerInput').value = getSelectedConv().aiSuggestedReply;
-      $('#composerInput').focus();
-      toast('Resposta sugerida inserida!');
     });
 
     // Composer
@@ -896,8 +2068,331 @@
     });
 
     $('#btnCannedTrigger').addEventListener('click', () => {
+      closeComposerPopovers('canned');
       if ($('#cannedPopover').classList.contains('hidden')) showCanned('');
       else hideCanned();
+    });
+
+    // ======================================================================
+    // CLIPE (ANEXOS) & SELETOR DE EMOJIS NO COMPOSER
+    // ======================================================================
+    const EMOJI_BANK = {
+      faces: ['😀', '😃', '😄', '😁', '😊', '😉', '😍', '🥰', '😎', '🤩', '🤔', '😅', '😂', '🙏', '🥳', '😌', '😮', '😢', '😡', '🤝', '🙌', '👏', '🤗', '🫡'],
+      gestures: ['👍', '👎', '👌', '✌️', '🤞', '🤙', '👋', '🤚', '✋', '🖐️', '👉', '👈', '☝️', '👇', '💪', '✍️', '🫶', '🙏', '👏', '🤝', '🎉', '🔥', '⭐', '⚡'],
+      business: ['🚀', '💼', '📱', '💻', '📞', '📧', '📅', '⏰', '📄', '📎', '📊', '📈', '💳', '💰', '🧾', '✅', '🔔', '🛠️', '🔒', '🌐', '🏷️', '📦', '🚗', '🏢'],
+      symbols: ['❤️', '💛', '💚', '💙', '🖤', '✨', '⭐', '🔥', '⚡', '✅', '❌', '⚠️', 'ℹ️', '❓', '❗', '💯', '🎯', '📌', '📍', '🔗', '💬', '🎧', '🛡️', '🏆'],
+    };
+
+    const closeComposerPopovers = (except = null) => {
+      if (except !== 'canned') hideCanned();
+      if (except !== 'attach') {
+        $('#attachPopover').classList.add('hidden');
+        $('#btnAttachTrigger').setAttribute('aria-expanded', 'false');
+      }
+      if (except !== 'emoji') {
+        $('#emojiPopover').classList.add('hidden');
+        $('#btnEmojiTrigger').setAttribute('aria-expanded', 'false');
+      }
+    };
+
+    const closeComposerActionModal = () => {
+      state.composerActionType = null;
+      $('#composerActionModal').classList.add('hidden');
+    };
+
+    const pushRichMessage = ({ text = '', attachment = null }) => {
+      const conv = getSelectedConv();
+      if (!conv) return;
+      conv.messages.push({
+        id: 'm_' + Date.now(),
+        type: state.privateMode ? 'private' : 'outgoing',
+        sender: DATA.currentAgent.name,
+        text,
+        attachment,
+        time: nowTime(),
+      });
+      conv.updatedAt = nowTime();
+      conv.lastMessageTs = Date.now();
+      if (!state.privateMode) conv.waitMinutes = 0;
+      if (!state.privateMode && conv.assignee === 'queue') {
+        conv.assignee = DATA.currentAgent.id;
+      }
+      renderConversations();
+    };
+
+    const formatFileSize = (bytes) => {
+      if (!bytes) return 'Arquivo anexado';
+      if (bytes < 1024) return `${bytes} B`;
+      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+      return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    };
+
+    const renderEmojiGrid = (cat = 'faces') => {
+      state.emojiCat = cat;
+      $$('.emoji-tab').forEach((t) => t.classList.toggle('active', t.dataset.emojiCat === cat));
+      const list = EMOJI_BANK[cat] || EMOJI_BANK.faces;
+      $('#emojiGrid').innerHTML = list
+        .map((em) => `<button type="button" class="emoji-btn" data-emoji="${em}">${em}</button>`)
+        .join('');
+      $$('.emoji-btn').forEach((btn) => {
+        btn.onclick = (e) => {
+          e.stopPropagation();
+          const input = $('#composerInput');
+          const em = btn.dataset.emoji;
+          const start = input.selectionStart ?? input.value.length;
+          const end = input.selectionEnd ?? input.value.length;
+          input.value = input.value.slice(0, start) + em + input.value.slice(end);
+          const nextPos = start + em.length;
+          input.focus();
+          try {
+            input.setSelectionRange(nextPos, nextPos);
+          } catch {}
+        };
+      });
+    };
+
+    $('#btnAttachTrigger').addEventListener('click', (e) => {
+      e.stopPropagation();
+      const willOpen = $('#attachPopover').classList.contains('hidden');
+      closeComposerPopovers();
+      if (willOpen) {
+        $('#attachPopover').classList.remove('hidden');
+        $('#btnAttachTrigger').setAttribute('aria-expanded', 'true');
+      }
+    });
+
+    $('#attachPopover').addEventListener('click', (e) => e.stopPropagation());
+
+    $('#btnEmojiTrigger').addEventListener('click', (e) => {
+      e.stopPropagation();
+      const willOpen = $('#emojiPopover').classList.contains('hidden');
+      closeComposerPopovers();
+      if (willOpen) {
+        renderEmojiGrid(state.emojiCat);
+        $('#emojiPopover').classList.remove('hidden');
+        $('#btnEmojiTrigger').setAttribute('aria-expanded', 'true');
+      }
+    });
+
+    $('#emojiPopover').addEventListener('click', (e) => e.stopPropagation());
+    $$('.emoji-tab').forEach((tab) => {
+      tab.addEventListener('click', (e) => {
+        e.stopPropagation();
+        renderEmojiGrid(tab.dataset.emojiCat);
+      });
+    });
+
+    const openComposerActionModal = (type) => {
+      state.composerActionType = type;
+      const titleEl = $('#composerActionTitle');
+      const bodyEl = $('#composerActionBody');
+      const btnConfirm = $('#btnConfirmComposerAction');
+      btnConfirm.textContent = 'Enviar na conversa';
+
+      if (type === 'audio') {
+        titleEl.textContent = 'Enviar Áudio';
+        bodyEl.innerHTML = `
+          <label>Título / descrição do áudio</label>
+          <input type="text" id="actAudioLabel" class="field-input" value="Mensagem de voz" />
+          <label>Ou selecione um arquivo de áudio do computador</label>
+          <button type="button" class="btn secondary pill" id="btnPickAudioFile">Escolher arquivo de áudio (.mp3, .ogg, .wav)</button>
+        `;
+        $('#composerActionModal').classList.remove('hidden');
+        $('#btnPickAudioFile').onclick = () => {
+          closeComposerActionModal();
+          $('#fileInputAudio').click();
+        };
+        return;
+      }
+
+      if (type === 'contact') {
+        titleEl.textContent = 'Enviar Contato';
+        const options = state.conversations
+          .map((c) => `<option value="${escapeHtml(c.contact.name)}|${escapeHtml(c.contact.phone)}">${escapeHtml(c.contact.name)} (${escapeHtml(c.contact.phone)})</option>`)
+          .join('');
+        bodyEl.innerHTML = `
+          <label>Escolher contato da base</label>
+          <select id="actContactSelect" class="field-select">${options}</select>
+        `;
+      } else if (type === 'poll') {
+        titleEl.textContent = 'Criar Enquete';
+        bodyEl.innerHTML = `
+          <label>Pergunta da enquete</label>
+          <input type="text" id="actPollQuestion" class="field-input" placeholder="Ex: Qual o melhor horário para nossa reunião?" />
+          <label>Opção 1</label>
+          <input type="text" id="actPollOpt1" class="field-input" placeholder="Ex: Manhã (09h às 12h)" />
+          <label>Opção 2</label>
+          <input type="text" id="actPollOpt2" class="field-input" placeholder="Ex: Tarde (14h às 18h)" />
+          <label>Opção 3 (opcional)</label>
+          <input type="text" id="actPollOpt3" class="field-input" placeholder="Ex: Outro horário" />
+        `;
+      } else if (type === 'pix') {
+        titleEl.textContent = 'Enviar Cobrança Pix';
+        bodyEl.innerHTML = `
+          <label>Chave Pix</label>
+          <input type="text" id="actPixKey" class="field-input" value="financeiro@supermegavendas.com" />
+          <label>Valor (R$)</label>
+          <input type="text" id="actPixAmount" class="field-input" placeholder="Ex: R$ 299,00" value="R$ 299,00" />
+          <label>Descrição (opcional)</label>
+          <input type="text" id="actPixDesc" class="field-input" placeholder="Ex: Mensalidade SMV Sac" />
+        `;
+      } else if (type === 'event') {
+        titleEl.textContent = 'Criar Evento';
+        bodyEl.innerHTML = `
+          <label>Título do evento</label>
+          <input type="text" id="actEventTitle" class="field-input" placeholder="Ex: Reunião de Alinhamento SMV" />
+          <label>Data e horário</label>
+          <input type="text" id="actEventWhen" class="field-input" placeholder="Ex: Segunda-feira às 09:00" value="Segunda-feira às 09:00" />
+          <label>Local ou link da sala (opcional)</label>
+          <input type="text" id="actEventLoc" class="field-input" placeholder="Ex: Google Meet" />
+        `;
+      } else if (type === 'sticker') {
+        titleEl.textContent = 'Nova Figurinha';
+        state.selectedQuickSticker = '🚀';
+        bodyEl.innerHTML = `
+          <label>Escolha uma figurinha rápida do SMV Sac</label>
+          <div class="sticker-quick-grid">
+            <button type="button" class="sticker-quick-btn selected" data-quick-sticker="🚀">🚀<span>Foguete</span></button>
+            <button type="button" class="sticker-quick-btn" data-quick-sticker="✅">✅<span>Feito</span></button>
+            <button type="button" class="sticker-quick-btn" data-quick-sticker="🤝">🤝<span>Fechado</span></button>
+            <button type="button" class="sticker-quick-btn" data-quick-sticker="🎉">🎉<span>Sucesso</span></button>
+          </div>
+          <label style="margin-top:10px;">Ou envie uma imagem do computador como figurinha</label>
+          <button type="button" class="btn secondary pill" id="btnPickStickerFile">Carregar imagem (.png, .webp)</button>
+        `;
+        $('#composerActionModal').classList.remove('hidden');
+        $$('[data-quick-sticker]').forEach((b) => {
+          b.onclick = () => {
+            state.selectedQuickSticker = b.dataset.quickSticker;
+            $$('[data-quick-sticker]').forEach((x) => x.classList.toggle('selected', x === b));
+          };
+        });
+        $('#btnPickStickerFile').onclick = () => {
+          closeComposerActionModal();
+          $('#fileInputSticker').click();
+        };
+        return;
+      }
+
+      $('#composerActionModal').classList.remove('hidden');
+      const firstInput = bodyEl.querySelector('input, select');
+      if (firstInput) setTimeout(() => firstInput.focus(), 20);
+    };
+
+    $$('[data-attach-type]').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const type = btn.dataset.attachType;
+        closeComposerPopovers();
+        if (type === 'document') $('#fileInputDocument').click();
+        else if (type === 'media') $('#fileInputMedia').click();
+        else if (type === 'camera') $('#fileInputCamera').click();
+        else openComposerActionModal(type);
+      });
+    });
+
+    $('#fileInputDocument').addEventListener('change', (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      pushRichMessage({
+        text: '',
+        attachment: { kind: 'document', name: file.name, size: formatFileSize(file.size) },
+      });
+      e.target.value = '';
+      toast(`📄 Documento "${file.name}" enviado!`);
+    });
+
+    const handleMediaFile = (e, label) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const isImage = file.type.startsWith('image/');
+      if (isImage) {
+        const url = URL.createObjectURL(file);
+        pushRichMessage({ text: '', attachment: { kind: 'image', url, name: file.name } });
+      } else {
+        pushRichMessage({
+          text: '',
+          attachment: { kind: 'document', name: `🎬 ${file.name}`, size: formatFileSize(file.size) },
+        });
+      }
+      e.target.value = '';
+      toast(`${label} "${file.name}" enviado!`);
+    };
+
+    $('#fileInputMedia').addEventListener('change', (e) => handleMediaFile(e, '🖼️ Mídia'));
+    $('#fileInputCamera').addEventListener('change', (e) => handleMediaFile(e, '📷 Foto'));
+
+    $('#fileInputAudio').addEventListener('change', (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      pushRichMessage({
+        text: '',
+        attachment: { kind: 'audio', name: file.name, duration: formatFileSize(file.size) },
+      });
+      e.target.value = '';
+      toast(`🎧 Áudio "${file.name}" enviado!`);
+    });
+
+    $('#fileInputSticker').addEventListener('change', (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const url = URL.createObjectURL(file);
+      pushRichMessage({ text: '', attachment: { kind: 'sticker', url } });
+      e.target.value = '';
+      toast('Figurinha enviada!');
+    });
+
+    $('#btnCloseComposerAction').addEventListener('click', closeComposerActionModal);
+    $('#btnCancelComposerAction').addEventListener('click', closeComposerActionModal);
+    $('#composerActionModal').addEventListener('click', (e) => {
+      if (e.target === $('#composerActionModal')) closeComposerActionModal();
+    });
+
+    $('#btnConfirmComposerAction').addEventListener('click', () => {
+      const type = state.composerActionType;
+      if (type === 'audio') {
+        const label = $('#actAudioLabel')?.value.trim() || 'Mensagem de voz';
+        pushRichMessage({ text: '', attachment: { kind: 'audio', name: label, duration: '0:14' } });
+        toast('🎧 Áudio enviado!');
+      } else if (type === 'contact') {
+        const val = $('#actContactSelect')?.value || 'Contato|+55 11 99999-0000';
+        const [contactName, contactPhone] = val.split('|');
+        pushRichMessage({ text: '', attachment: { kind: 'contact', contactName, contactPhone } });
+        toast(`👤 Contato "${contactName}" compartilhado!`);
+      } else if (type === 'poll') {
+        const question = $('#actPollQuestion')?.value.trim();
+        const options = [$('#actPollOpt1')?.value.trim(), $('#actPollOpt2')?.value.trim(), $('#actPollOpt3')?.value.trim()].filter(Boolean);
+        if (!question || options.length < 2) {
+          toast('Informe a pergunta e pelo menos 2 opções da enquete');
+          return;
+        }
+        pushRichMessage({ text: '', attachment: { kind: 'poll', question, options } });
+        toast('📊 Enquete enviada!');
+      } else if (type === 'pix') {
+        const key = $('#actPixKey')?.value.trim();
+        const amount = $('#actPixAmount')?.value.trim() || 'R$ 0,00';
+        const desc = $('#actPixDesc')?.value.trim() || '';
+        if (!key) {
+          toast('Informe a chave Pix');
+          return;
+        }
+        pushRichMessage({ text: '', attachment: { kind: 'pix', key, amount, desc } });
+        toast('💠 Cobrança Pix enviada!');
+      } else if (type === 'event') {
+        const title = $('#actEventTitle')?.value.trim();
+        const when = $('#actEventWhen')?.value.trim() || 'A combinar';
+        const location = $('#actEventLoc')?.value.trim() || '';
+        if (!title) {
+          toast('Informe o título do evento');
+          return;
+        }
+        pushRichMessage({ text: '', attachment: { kind: 'event', title, when, location } });
+        toast('📅 Evento enviado!');
+      } else if (type === 'sticker') {
+        pushRichMessage({ text: '', attachment: { kind: 'sticker', glyph: state.selectedQuickSticker || '🚀' } });
+        toast('Figurinha enviada!');
+      }
+      closeComposerActionModal();
     });
 
     $('#btnTogglePrivate').addEventListener('click', () => {
@@ -908,12 +2403,6 @@
       $('#composerInput').placeholder = state.privateMode
         ? 'Escreva uma nota interna para a equipe...'
         : "Digite uma mensagem (ou '/' para respostas rápidas)...";
-    });
-
-    $('#btnAiDraft').addEventListener('click', () => {
-      $('#composerInput').value = getSelectedConv().aiSuggestedReply;
-      $('#composerInput').focus();
-      toast('✨ Sugestão da IA preenchida!');
     });
 
     // Conexões
@@ -932,39 +2421,368 @@
       renderConnections();
     });
 
-    // Modal Adicionar Conexão
-    const closeConnModal = () => $('#addConnModal').classList.add('hidden');
+    // Modal Adicionar / Editar Conexão
+    const closeConnModal = () => {
+      state.editingConnId = null;
+      $('#addConnModal').classList.add('hidden');
+    };
+    const closeViewConnModal = () => {
+      state.viewingConnId = null;
+      $('#viewConnModal').classList.add('hidden');
+    };
+    const closeEventsConnModal = () => $('#eventsConnModal').classList.add('hidden');
+    const closeDeleteConnModal = () => {
+      state.deletingConnId = null;
+      $('#deleteConnModal').classList.add('hidden');
+    };
+    const closeUpgradeConnModal = () => {
+      state.upgradingChannel = null;
+      $('#upgradeConnModal').classList.add('hidden');
+    };
+
     $('#btnAddConnection').addEventListener('click', () => {
-      $('#newConnName').value = '';
-      $('#newConnIdentifier').value = '';
-      $('#addConnModal').classList.remove('hidden');
-      setTimeout(() => $('#newConnName').focus(), 20);
+      state.openConnMenuId = null;
+      state.connSubView = 'add';
+      renderConnections();
+    });
+    $('#btnConnBackToList').addEventListener('click', () => {
+      state.connSubView = 'list';
+      renderConnections();
+    });
+    $('#btnConnBreadcrumbBack').addEventListener('click', () => {
+      state.connSubView = 'list';
+      renderConnections();
+    });
+    $('#newConnChannel').addEventListener('change', (e) => {
+      const chInfo = getChannelCatalogInfo(e.target.value);
+      $('#newConnIdentifier').placeholder = chInfo.placeholder;
+    });
+    $('#btnCloseUpgradeConn').addEventListener('click', closeUpgradeConnModal);
+    $('#btnCancelUpgradeConn').addEventListener('click', closeUpgradeConnModal);
+    $('#upgradeConnModal').addEventListener('click', (e) => {
+      if (e.target === $('#upgradeConnModal')) closeUpgradeConnModal();
+    });
+    $('#btnConfirmUpgradeConn').addEventListener('click', () => {
+      const channel = state.upgradingChannel;
+      if (!channel) return;
+      state.connQuotas[channel] = (state.connQuotas[channel] ?? 0) + 1;
+      closeUpgradeConnModal();
+      renderConnectionsCatalog();
+      toast(`+1 vaga liberada para ${getChannelCatalogInfo(channel).title}!`);
+      openConnectionFormModal(null, channel);
     });
     $('#btnCloseAddConn').addEventListener('click', closeConnModal);
     $('#btnCancelAddConn').addEventListener('click', closeConnModal);
+    $('#addConnModal').addEventListener('click', (e) => {
+      if (e.target === $('#addConnModal')) closeConnModal();
+    });
+
     $('#btnSaveAddConn').addEventListener('click', () => {
       const name = $('#newConnName').value.trim();
       if (!name) {
         toast('Informe o nome da conexão');
         return;
       }
-      state.connections.unshift({
-        id: 'conn_' + Date.now(),
-        name,
-        channel: $('#newConnChannel').value,
-        identifier: $('#newConnIdentifier').value.trim() || '-',
-        bot: '-',
-        department: $('#newConnDept').value,
-        status: 'active',
-      });
-      state.connTab = 'active';
+
+      const channel = $('#newConnChannel').value;
+      const identifier = $('#newConnIdentifier').value.trim() || '-';
+      const bot = $('#newConnBot').value;
+      const department = $('#newConnDept').value;
+
+      if (state.editingConnId) {
+        const existing = state.connections.find((c) => c.id === state.editingConnId);
+        if (existing) {
+          existing.name = name;
+          existing.channel = channel;
+          existing.identifier = identifier;
+          existing.bot = bot;
+          existing.department = department;
+          pushConnectionEvent(existing, 'Configurações da conexão atualizadas', 'info');
+          toast(`Conexão "${name}" atualizada!`);
+        }
+      } else {
+        const created = {
+          id: 'conn_' + Date.now(),
+          name,
+          channel,
+          identifier,
+          bot,
+          department,
+          status: 'active',
+          sessionState: 'connected',
+          events: [],
+        };
+        pushConnectionEvent(created, `Conexão ${channel} criada e conectada`, 'success');
+        state.connections.unshift(created);
+        state.connTab = 'active';
+        state.connSubView = 'list';
+        toast(`Conexão "${name}" adicionada e conectada!`);
+      }
+
       closeConnModal();
       renderConnections();
-      toast(`Conexão "${name}" adicionada e conectada!`);
     });
 
-    // Contatos
+    // Modal Visualizar Conexão
+    $('#btnCloseViewConn').addEventListener('click', closeViewConnModal);
+    $('#btnOkViewConn').addEventListener('click', closeViewConnModal);
+    $('#viewConnModal').addEventListener('click', (e) => {
+      if (e.target === $('#viewConnModal')) closeViewConnModal();
+    });
+    $('#btnViewConnEdit').addEventListener('click', () => {
+      const conn = state.connections.find((c) => c.id === state.viewingConnId);
+      closeViewConnModal();
+      if (conn) openConnectionFormModal(conn);
+    });
+
+    // Modal Histórico de Eventos
+    $('#btnCloseEventsConn').addEventListener('click', closeEventsConnModal);
+    $('#btnOkEventsConn').addEventListener('click', closeEventsConnModal);
+    $('#eventsConnModal').addEventListener('click', (e) => {
+      if (e.target === $('#eventsConnModal')) closeEventsConnModal();
+    });
+
+    // Modal Excluir Conexão
+    $('#btnCloseDeleteConn').addEventListener('click', closeDeleteConnModal);
+    $('#btnCancelDeleteConn').addEventListener('click', closeDeleteConnModal);
+    $('#deleteConnModal').addEventListener('click', (e) => {
+      if (e.target === $('#deleteConnModal')) closeDeleteConnModal();
+    });
+    $('#btnConfirmDeleteConn').addEventListener('click', () => {
+      const idx = state.connections.findIndex((c) => c.id === state.deletingConnId);
+      if (idx !== -1) {
+        const [removed] = state.connections.splice(idx, 1);
+        toast(`Conexão "${removed.name}" excluída!`);
+      }
+      closeDeleteConnModal();
+      renderConnections();
+    });
+
+    // Fechar menus flutuantes ao clicar fora
+    document.addEventListener('click', (e) => {
+      if (state.openConnMenuId !== null && !e.target.closest('.conn-menu-wrap')) {
+        state.openConnMenuId = null;
+        renderConnections();
+      }
+      if (!e.target.closest('.conv-menu-wrap')) {
+        closeConvMenus();
+      }
+      if (!e.target.closest('.contacts-import-wrap')) {
+        closeContactsImportMenu();
+      }
+      if (!e.target.closest('.topbar-popover-wrap')) {
+        closeTopbarPopovers();
+      }
+      if (!e.target.closest('#composerBar')) {
+        closeComposerPopovers();
+      }
+    });
+
+    // Contatos: Botões Importar contatos, Novo contato, Exibir Filtros e Atualizar
+    const closeContactsImportMenu = () => {
+      $('#contactsImportMenu').classList.add('hidden');
+      $('#btnContactsImportMenu').setAttribute('aria-expanded', 'false');
+    };
+    const closeImportContactsModal = () => $('#importContactsModal').classList.add('hidden');
+
+    $('#btnContactsImportMenu').addEventListener('click', (e) => {
+      e.stopPropagation();
+      const willOpen = $('#contactsImportMenu').classList.contains('hidden');
+      closeContactsImportMenu();
+      if (willOpen) {
+        $('#contactsImportMenu').classList.remove('hidden');
+        $('#btnContactsImportMenu').setAttribute('aria-expanded', 'true');
+      }
+    });
+
+    $('#btnContactsOpenImportModal').addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeContactsImportMenu();
+      populateConnOptions($('#importContactsConn'));
+      $('#importContactsFile').value = '';
+      $('#importContactsModal').classList.remove('hidden');
+    });
+
+    $('#btnContactsDownloadTemplate').addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeContactsImportMenu();
+      const csv = [
+        'Nome,Telefone,Email',
+        'Ana Paula - Motors,+55 (11) 99123-4567,ana.paula@motors.com.br',
+        'Rodrigo - Imperial Honda,+55 (84) 98801-3344,rodrigo@imperialhonda.com.br',
+      ].join('\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'smv-sac-modelo-contatos.csv';
+      a.click();
+      URL.revokeObjectURL(url);
+      toast('Planilha modelo CSV baixada!');
+    });
+
+    $('#btnContactsExportCsv').addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeContactsImportMenu();
+      const rows = getFilteredContacts();
+      const csv = [
+        'Nome,Telefone,Email,Conexao,Departamento',
+        ...rows.map((c) =>
+          [c.contact.name, c.contact.phone, c.contact.email, c.connection, c.department]
+            .map((v) => `"${String(v || '').replace(/"/g, '""')}"`)
+            .join(',')
+        ),
+      ].join('\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'smv-sac-contatos.csv';
+      a.click();
+      URL.revokeObjectURL(url);
+      toast(`${rows.length} contatos exportados em CSV!`);
+    });
+
+    const addImportedContacts = (entries) => {
+      const connSelect = $('#importContactsConn');
+      const connName = connSelect.value || 'SUPER MEGAVENDAS';
+      const channel = connSelect.selectedOptions?.[0]?.dataset?.channel || 'WhatsApp';
+      const dept = $('#importContactsDept').value || 'Suporte';
+      const baseNow = Date.now();
+
+      entries.forEach((item, idx) => {
+        const parts = item.name.split(/\s+/);
+        const initials = ((parts[0]?.[0] || 'C') + (parts[1]?.[0] || parts[0]?.[1] || 'T')).toUpperCase();
+        state.conversations.unshift({
+          id: 800 + ((baseNow + idx) % 100000),
+          ticketNumber: generateTicketNumber(),
+          status: 'open',
+          assignee: 'queue',
+          connection: connName,
+          channel,
+          department: dept,
+          unread: 0,
+          updatedAt: nowTime(),
+          createdTs: baseNow + idx,
+          lastMessageTs: baseNow + idx,
+          waitMinutes: 1,
+          labels: [dept],
+          contact: {
+            name: item.name,
+            initials,
+            role: `Importado via CSV • ${channel}`,
+            phone: item.phone || 'Não informado',
+            email: item.email || '-',
+          },
+          summary: `Contato ${item.name} importado em lote via CSV.`,
+          aiSuggestedReply: `Olá ${parts[0] || item.name}! Tudo bem? Aqui é da equipe SMV Sac.`,
+          autoCustomerReply: 'Olá! Obrigado pelo contato!',
+          messages: [
+            {
+              id: 'imp_' + (baseNow + idx),
+              type: 'activity',
+              text: `Contato importado para ${connName} (${dept})`,
+              time: nowTime(),
+            },
+          ],
+        });
+      });
+
+      closeImportContactsModal();
+      renderContacts();
+      updateGlobalCounts();
+      toast(`${entries.length} contato(s) importado(s) com sucesso!`);
+    };
+
+    $('#btnCloseImportContacts').addEventListener('click', closeImportContactsModal);
+    $('#btnCancelImportContacts').addEventListener('click', closeImportContactsModal);
+    $('#importContactsModal').addEventListener('click', (e) => {
+      if (e.target === $('#importContactsModal')) closeImportContactsModal();
+    });
+
+    $('#btnConfirmImportContacts').addEventListener('click', () => {
+      const file = $('#importContactsFile').files?.[0];
+      if (!file) {
+        toast('Selecione um arquivo .csv para importar');
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const text = String(reader.result || '');
+        const lines = text
+          .split(/\r?\n/)
+          .map((l) => l.trim())
+          .filter(Boolean);
+        const parsed = [];
+        lines.forEach((line, index) => {
+          const cols = line.split(/[,;]/).map((c) => c.replace(/^"|"$/g, '').trim());
+          if (index === 0 && cols[0]?.toLowerCase() === 'nome') return;
+          if (cols[0]) {
+            parsed.push({ name: cols[0], phone: cols[1] || '', email: cols[2] || '' });
+          }
+        });
+        if (parsed.length === 0) {
+          toast('Nenhum contato válido encontrado no CSV.');
+          return;
+        }
+        addImportedContacts(parsed);
+      };
+      reader.readAsText(file, 'utf-8');
+    });
+
+    $('#btnContactsNewContact').addEventListener('click', () => {
+      state.contactModalSource = 'contacts';
+      populateConnOptions($('#newContactConvConn'));
+      $('#newContactConvName').value = '';
+      $('#newContactConvPhone').value = '';
+      $('#newContactConvEmail').value = '';
+      $('#newContactConvMsg').value = '';
+      $('#addContactConvModal').classList.remove('hidden');
+      setTimeout(() => $('#newContactConvName').focus(), 20);
+    });
+
+    $('#btnContactsToggleFilters').addEventListener('click', () => {
+      state.contactsFiltersOpen = !state.contactsFiltersOpen;
+      $('#contactsFilterBar').classList.toggle('hidden', !state.contactsFiltersOpen);
+      $('#contactsFilterBtnLabel').textContent = state.contactsFiltersOpen ? 'Ocultar Filtros' : 'Exibir Filtros';
+      if (state.contactsFiltersOpen) {
+        setTimeout(() => $('#contactsSearchInput').focus(), 20);
+      }
+    });
+
+    $('#btnContactsRefresh').addEventListener('click', () => {
+      const btn = $('#btnContactsRefresh');
+      btn.classList.remove('spinning');
+      void btn.offsetWidth;
+      btn.classList.add('spinning');
+      renderContacts();
+      toast('Lista de contatos atualizada!');
+      setTimeout(() => btn.classList.remove('spinning'), 600);
+    });
+
     $('#contactsSearchInput').addEventListener('input', renderContacts);
+    $('#contactsConnFilter').addEventListener('change', (e) => {
+      state.contactsConnFilter = e.target.value;
+      renderContacts();
+    });
+    $('#contactsDeptFilter').addEventListener('change', (e) => {
+      state.contactsDeptFilter = e.target.value;
+      renderContacts();
+    });
+    $('#contactsLabelFilter').addEventListener('change', (e) => {
+      state.contactsLabelFilter = e.target.value;
+      renderContacts();
+    });
+    $('#btnContactsClearFilters').addEventListener('click', () => {
+      $('#contactsSearchInput').value = '';
+      state.contactsConnFilter = 'all';
+      state.contactsDeptFilter = 'all';
+      state.contactsLabelFilter = 'all';
+      $('#contactsDeptFilter').value = 'all';
+      $('#contactsLabelFilter').value = 'all';
+      renderContacts();
+      toast('Filtros de contatos limpos');
+    });
 
     // Relatórios
     $$('#reportPeriodGroup .seg-btn').forEach((b) => {
@@ -989,30 +2807,6 @@
       toast('Relatório CSV exportado!');
     });
 
-    // IA View
-    $('#toggleAiAuto').addEventListener('change', (e) => {
-      $('#aiAutoLabel').textContent = e.target.checked ? 'Triagem automática ativa' : 'Triagem automática pausada';
-    });
-    $$('.prompt-chip').forEach((c) => c.addEventListener('click', () => runAiSandbox(c.dataset.q)));
-    $('#btnAiSandboxSend').addEventListener('click', () => {
-      runAiSandbox($('#aiSandboxInput').value);
-      $('#aiSandboxInput').value = '';
-    });
-    $('#aiSandboxInput').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') $('#btnAiSandboxSend').click();
-    });
-
-    // Live Widget
-    $('#btnToggleLiveWidget').addEventListener('click', () => {
-      if ($('#liveWidgetModal').classList.contains('hidden')) openLiveWidget();
-      else $('#liveWidgetModal').classList.add('hidden');
-    });
-    $('#btnCloseLiveWidget').addEventListener('click', () => $('#liveWidgetModal').classList.add('hidden'));
-    $('#btnLwSend').addEventListener('click', sendFromLiveWidget);
-    $('#lwInput').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') sendFromLiveWidget();
-    });
-
     // Command Bar
     $('#btnOpenCommandBar').addEventListener('click', () => {
       $('#commandBarModal').classList.remove('hidden');
@@ -1023,6 +2817,91 @@
     $('#commandBarInput').addEventListener('input', (e) => renderCommandBar(e.target.value));
     $('#commandBarModal').addEventListener('click', (e) => {
       if (e.target === $('#commandBarModal')) $('#commandBarModal').classList.add('hidden');
+    });
+
+    // ======================================================================
+    // MANUAL DE USO (? ▾) & CENTRAL DE NOTIFICAÇÕES (🔔)
+    // ======================================================================
+    const closeTopbarPopovers = () => {
+      $('#helpMenu').classList.add('hidden');
+      $('#notificationsPanel').classList.add('hidden');
+      $('#userProfileMenu').classList.add('hidden');
+      $('#btnHelpMenu').setAttribute('aria-expanded', 'false');
+      $('#btnNotifications').setAttribute('aria-expanded', 'false');
+      $('#agentStatusToggle').setAttribute('aria-expanded', 'false');
+    };
+    const closeManualModal = () => $('#manualModal').classList.add('hidden');
+
+    $('#btnHelpMenu').addEventListener('click', (e) => {
+      e.stopPropagation();
+      const willOpen = $('#helpMenu').classList.contains('hidden');
+      closeTopbarPopovers();
+      if (willOpen) {
+        $('#helpMenu').classList.remove('hidden');
+        $('#btnHelpMenu').setAttribute('aria-expanded', 'true');
+      }
+    });
+
+    $('#btnOpenManual').addEventListener('click', () => {
+      closeTopbarPopovers();
+      openManualModal('start');
+    });
+    $('#btnOpenShortcuts').addEventListener('click', () => {
+      closeTopbarPopovers();
+      openManualModal('shortcuts');
+    });
+    $('#btnOpenLgpdFromTop').addEventListener('click', () => {
+      closeTopbarPopovers();
+      state.pendingUser = null;
+      openLgpdModal();
+    });
+
+    $$('.manual-tab').forEach((tabBtn) => {
+      tabBtn.addEventListener('click', () => openManualModal(tabBtn.dataset.manualTab));
+    });
+    $('#btnCloseManual').addEventListener('click', closeManualModal);
+    $('#btnOkManual').addEventListener('click', closeManualModal);
+    $('#manualModal').addEventListener('click', (e) => {
+      if (e.target === $('#manualModal')) closeManualModal();
+    });
+
+    $('#btnNotifications').addEventListener('click', (e) => {
+      e.stopPropagation();
+      const willOpen = $('#notificationsPanel').classList.contains('hidden');
+      closeTopbarPopovers();
+      if (willOpen) {
+        renderNotifications();
+        $('#notificationsPanel').classList.remove('hidden');
+        $('#btnNotifications').setAttribute('aria-expanded', 'true');
+      }
+    });
+
+    $('#notificationsPanel').addEventListener('click', (e) => e.stopPropagation());
+
+    $$('.notif-tab').forEach((tabBtn) => {
+      tabBtn.addEventListener('click', () => {
+        state.notifFilter = tabBtn.dataset.notifFilter;
+        renderNotifications();
+      });
+    });
+
+    $('#btnMarkAllRead').addEventListener('click', () => {
+      state.notifications.forEach((n) => {
+        n.unread = false;
+      });
+      renderNotifications();
+      toast('Todas as notificações marcadas como lidas');
+    });
+
+    $('#btnClearReadNotifs').addEventListener('click', () => {
+      state.notifications = state.notifications.filter((n) => n.unread);
+      renderNotifications();
+      toast('Notificações lidas removidas');
+    });
+
+    $('#toggleNotifSound').addEventListener('change', (e) => {
+      state.notifSoundEnabled = e.target.checked;
+      toast(state.notifSoundEnabled ? '🔊 Alerta sonoro ativado' : '🔇 Alerta sonoro desativado');
     });
 
     // ======================================================================
@@ -1195,7 +3074,6 @@
       state.authenticated = false;
       state.lgpdAccepted = false;
       $('#appShell').classList.add('hidden');
-      $('#liveWidgetModal').classList.add('hidden');
       $('#authScreen').classList.remove('hidden');
       showAuthPanel('login');
       toast('Você saiu da sua conta SMV Sac.');
@@ -1208,6 +3086,26 @@
       } else if (e.key === 'Escape') {
         $('#commandBarModal').classList.add('hidden');
         closeConnModal();
+        closeViewConnModal();
+        closeEventsConnModal();
+        closeDeleteConnModal();
+        closeUpgradeConnModal();
+        closeAddContactConvModal();
+        closeAddGroupConvModal();
+        closeImportContactsModal();
+        closeManualModal();
+        closeAccountModal();
+        closeAboutModal();
+        closeComposerActionModal();
+        closeTransferModal();
+        closeConvMenus();
+        closeContactsImportMenu();
+        closeTopbarPopovers();
+        closeComposerPopovers();
+        if (state.openConnMenuId !== null) {
+          state.openConnMenuId = null;
+          renderConnections();
+        }
         hideCanned();
         closeLgpdModal();
       }
@@ -1275,15 +3173,24 @@
 
   function completeLogin(user) {
     state.authenticated = true;
-    const parts = (user.name || 'LM').trim().split(/\s+/);
+    state.currentUser = {
+      name: user.name || 'Ransay',
+      email: user.email || 'ransay@supermegavendas.com',
+      role: user.role || 'Agente',
+      subdomain: state.currentUser?.subdomain || 'supermegavendas',
+    };
+    const parts = (state.currentUser.name || 'RA').trim().split(/\s+/);
     const initials = (parts[0]?.[0] || 'S') + (parts[1]?.[0] || parts[0]?.[1] || 'M');
-    DATA.currentAgent.name = user.name;
+    DATA.currentAgent.name = state.currentUser.name;
     DATA.currentAgent.initials = initials.toUpperCase();
     const selfAgent = DATA.agents.find((a) => a.id === DATA.currentAgent.id);
     if (selfAgent) {
-      selfAgent.name = `${user.name} (${user.role === 'Admin' ? 'Admin' : 'Você'})`;
+      selfAgent.name = `${state.currentUser.name} (${state.currentUser.role === 'Admin' ? 'Admin' : 'Você'})`;
     }
     $('#agentAvatarInitials').textContent = DATA.currentAgent.initials;
+    $('#profileMenuUserName').textContent = state.currentUser.name;
+    $('#btnCopySubdomain').textContent = state.currentUser.subdomain;
+    $('#aboutSubdomainVal').textContent = state.currentUser.subdomain;
 
     $('#authScreen').classList.add('hidden');
     $('#appShell').classList.remove('hidden');
@@ -1297,5 +3204,6 @@
 
   bindEvents();
   applyTheme(state.theme);
+  renderNotifications();
   setView('conversations');
 })();

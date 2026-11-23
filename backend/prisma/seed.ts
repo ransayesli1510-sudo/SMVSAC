@@ -41,7 +41,7 @@ async function main(): Promise<void> {
   });
 
   // 3. Departamentos padrão
-  const departmentNames = ['Suporte', 'Vendas', 'Financeiro', 'Implantação'];
+  const departmentNames = ['Admin/Financeiro', 'Comercial', 'Marketing', 'Suporte', 'TI', 'Diretoria'];
   const departmentsByName = new Map<string, string>();
   for (const name of departmentNames) {
     const dept = await prisma.department.upsert({
@@ -156,7 +156,7 @@ async function main(): Promise<void> {
           channel: ChannelType.INSTAGRAM,
           provider: ConnectionProvider.META_CLOUD,
           identifier: '@smvsac.oficial',
-          defaultDepartmentId: departmentsByName.get('Vendas') ?? null,
+          defaultDepartmentId: departmentsByName.get('Comercial') ?? null,
           status: ConnectionStatus.ARCHIVED,
         },
       ],
