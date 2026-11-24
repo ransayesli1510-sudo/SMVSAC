@@ -1,12 +1,20 @@
 import { createClient } from '@supabase/supabase-js';
+import WebSocket from 'ws';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { env } from '../../config/env.js';
+
+if (!globalThis.WebSocket) {
+  (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = WebSocket;
+}
 
 export const supabaseAdmin = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
   auth: {
     persistSession: false,
     autoRefreshToken: false,
+  },
+  realtime: {
+    transport: WebSocket as unknown as typeof globalThis.WebSocket,
   },
 });
 

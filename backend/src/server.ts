@@ -1,3 +1,9 @@
+import WebSocket from 'ws';
+
+if (!globalThis.WebSocket) {
+  (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = WebSocket;
+}
+
 import { env } from './config/env.js';
 import { buildApp } from './app.js';
 import { initRealtime } from './realtime/socket.js';

@@ -5,7 +5,7 @@
   "description": "SMV Sac Omnichannel Backend — Fastify + TypeScript + Prisma + Supabase",
   "type": "module",
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
   "scripts": {
     "dev": "tsx watch src/server.ts",
@@ -40,10 +40,12 @@
     "pino": "^10.4.0",
     "qrcode": "^1.5.4",
     "socket.io": "^4.8.1",
+    "ws": "^8.18.0",
     "zod": "^3.24.2"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",
+    "@types/ws": "^8.18.0",
     "prisma": "^6.6.0",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2"

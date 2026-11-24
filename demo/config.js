@@ -19,7 +19,7 @@
   var PRODUCTION_API_URL =
     existing.API_URL ||
     metaApiUrl ||
-    'https://api.smvsac.com.br';
+    'https://web-production-3f15bd90.up.railway.app';
 
   var resolvedApiUrl = (isLocal ? 'http://localhost:3333' : PRODUCTION_API_URL).replace(/\/+$/, '');
 
