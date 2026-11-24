@@ -35,9 +35,16 @@
     const data = contentType.includes('application/json') ? await response.json() : await response.text();
 
     if (!response.ok) {
-      const err = new Error(data?.message || `Erro HTTP ${response.status}`);
+      const firstFieldError =
+        data?.details && typeof data.details === 'object'
+          ? Object.values(data.details)
+              .flat()
+              .find((msg) => typeof msg === 'string' && msg.trim().length > 0)
+          : null;
+      const err = new Error(firstFieldError || data?.message || `Erro HTTP ${response.status}`);
       err.status = response.status;
       err.code = data?.error || 'API_ERROR';
+      err.details = data?.details;
       throw err;
     }
 
@@ -162,9 +169,32 @@
       });
     },
 
+    syncConnectionContacts(connectionId) {
+      return rawFetch(`/connections/${connectionId}/sync-contacts`, {
+        method: 'POST',
+      });
+    },
+
     deleteConnection(connectionId) {
       return rawFetch(`/connections/${connectionId}`, {
         method: 'DELETE',
+      });
+    },
+
+    // Contacts & Agenda Search
+    getContacts(params = {}) {
+      const clean = {};
+      Object.entries(params).forEach(([k, v]) => {
+        if (v !== undefined && v !== null && v !== '') clean[k] = String(v);
+      });
+      const qs = new URLSearchParams(clean).toString();
+      return rawFetch(`/contacts${qs ? `?${qs}` : ''}`);
+    },
+
+    createContact(payload) {
+      return rawFetch('/contacts', {
+        method: 'POST',
+        body: JSON.stringify(payload),
       });
     },
 
@@ -176,6 +206,13 @@
     getConversations(params = {}) {
       const qs = new URLSearchParams(params).toString();
       return rawFetch(`/conversations${qs ? `?${qs}` : ''}`);
+    },
+
+    openOrCreateConversation(payload) {
+      return rawFetch('/conversations', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
     },
 
     markConversationRead(conversationId) {
@@ -262,6 +299,14 @@
 
       socket.on('conversation:updated', (payload) => {
         if (handlers.onConversationUpdated) handlers.onConversationUpdated(payload);
+      });
+
+      socket.on('contact:avatar_updated', (payload) => {
+        if (handlers.onContactAvatarUpdated) handlers.onContactAvatarUpdated(payload);
+      });
+
+      socket.on('whatsapp:contacts_synced', (payload) => {
+        if (handlers.onContactsSynced) handlers.onContactsSynced(payload);
       });
 
       return socket;

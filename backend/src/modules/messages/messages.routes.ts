@@ -11,45 +11,100 @@ import {
 import { z } from 'zod';
 
 import { prisma } from '../../shared/database/prisma.js';
+import { apiCache } from '../../shared/cache/api-cache.js';
 import { authenticate, getTenantContext } from '../../shared/http/authenticate.js';
 import { AppError } from '../../shared/http/errors.js';
 import { storageService } from '../../shared/storage/supabase-storage.js';
 import { emitToOrganization } from '../../realtime/socket.js';
 import { whatsappManager } from '../whatsapp/whatsapp.manager.js';
-import { serializeConversationForClient } from '../whatsapp/whatsapp.sync.js';
+import {
+  CONVERSATION_CLIENT_INCLUDE,
+  formatConversationForClient,
+} from '../whatsapp/whatsapp.sync.js';
 
 const sendTextMessageSchema = z.object({
   content: z.string().trim().min(1, 'Digite uma mensagem para enviar.').max(4096),
   visibility: z.enum(['PUBLIC', 'PRIVATE_NOTE']).default('PUBLIC'),
 });
 
+// Cache em memória de Signed URLs (30 min) para evitar round-trips repetidos ao Supabase Storage
+const SIGNED_URL_CACHE_TTL_MS = 30 * 60 * 1000;
+const signedUrlCache = new Map<string, { url: string; expiresAt: number }>();
+
+async function getCachedSignedUrl(bucket: string, storagePath: string): Promise<string | null> {
+  const key = `${bucket}:${storagePath}`;
+  const now = Date.now();
+  const cached = signedUrlCache.get(key);
+  if (cached && cached.expiresAt > now) {
+    return cached.url;
+  }
+  try {
+    const url = await storageService.getSignedUrl(bucket, storagePath, 3600);
+    if (signedUrlCache.size > 1000) signedUrlCache.clear();
+    signedUrlCache.set(key, { url, expiresAt: now + SIGNED_URL_CACHE_TTL_MS });
+    return url;
+  } catch {
+    return null;
+  }
+}
+
 export async function messagesRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', authenticate);
 
-  // GET /api/v1/messages/conversation/:conversationId
+  // GET /api/v1/messages/conversation/:conversationId (cache em memória + consulta única consolidada)
   app.get('/conversation/:conversationId', async (request, reply) => {
     const tenant = getTenantContext(request);
     const { conversationId } = request.params as { conversationId: string };
 
+    const cached = apiCache.getMessages(tenant.organizationId, conversationId);
+    if (cached) {
+      return reply.send({ messages: cached });
+    }
+
     const conv = await prisma.conversation.findFirst({
       where: { id: conversationId, organizationId: tenant.organizationId },
-      select: { id: true },
+      select: {
+        id: true,
+        messages: {
+          orderBy: { createdAt: 'desc' },
+          take: 200,
+          select: {
+            id: true,
+            conversationId: true,
+            externalId: true,
+            visibility: true,
+            direction: true,
+            senderName: true,
+            content: true,
+            contentType: true,
+            deliveryStatus: true,
+            createdAt: true,
+            attachments: {
+              take: 1,
+              select: {
+                id: true,
+                storageBucket: true,
+                storagePath: true,
+                publicUrl: true,
+                fileName: true,
+                mimeType: true,
+                sizeBytes: true,
+              },
+            },
+            quotedMessage: {
+              select: { id: true, senderName: true, content: true },
+            },
+          },
+        },
+      },
     });
+
     if (!conv) {
       throw new AppError(404, 'CONVERSATION_NOT_FOUND', 'Conversa não encontrada.');
     }
 
-    const rows = await prisma.message.findMany({
-      where: { conversationId: conv.id },
-      orderBy: { createdAt: 'asc' },
-      take: 200,
-      include: {
-        attachments: true,
-        quotedMessage: {
-          select: { id: true, senderName: true, content: true },
-        },
-      },
-    });
+    // Reverte para ordem cronológica ascendente após buscar as 200 mais recentes
+    const rows = conv.messages.reverse();
 
     const messages = await Promise.all(
       rows.map(async (m) => {
@@ -63,14 +118,8 @@ export async function messagesRoutes(app: FastifyInstance): Promise<void> {
 
         const firstAtt = m.attachments[0];
         if (firstAtt) {
-          let url = firstAtt.publicUrl;
-          if (!url) {
-            try {
-              url = await storageService.getSignedUrl(firstAtt.storageBucket, firstAtt.storagePath, 3600);
-            } catch {
-              url = null;
-            }
-          }
+          const url =
+            firstAtt.publicUrl || (await getCachedSignedUrl(firstAtt.storageBucket, firstAtt.storagePath));
           attachment = {
             id: firstAtt.id,
             fileName: firstAtt.fileName,
@@ -96,15 +145,17 @@ export async function messagesRoutes(app: FastifyInstance): Promise<void> {
           deliveryStatus: m.deliveryStatus,
           quote: m.quotedMessage
             ? {
-                author: m.quotedMessage.senderName || 'Mensagem',
-                text: m.quotedMessage.content,
-              }
+              author: m.quotedMessage.senderName || 'Mensagem',
+              text: m.quotedMessage.content,
+            }
             : null,
           attachment,
           createdAt: m.createdAt.toISOString(),
         };
       })
     );
+
+    apiCache.setMessages(tenant.organizationId, conversationId, messages);
 
     return reply.send({ messages });
   });
@@ -114,14 +165,25 @@ export async function messagesRoutes(app: FastifyInstance): Promise<void> {
     const tenant = getTenantContext(request);
     const { conversationId } = request.params as { conversationId: string };
 
+    // Consulta única trazendo conexão, contato e identidades (evita 2 round-trips extras)
     const conv = await prisma.conversation.findFirst({
       where: { id: conversationId, organizationId: tenant.organizationId },
-      include: {
-        connection: true,
+      select: {
+        id: true,
+        connectionId: true,
+        contactId: true,
+        assigneeId: true,
+        firstResponseAt: true,
+        createdAt: true,
+        connection: {
+          select: { id: true, channel: true, provider: true },
+        },
         contact: {
-          include: {
+          select: {
+            id: true,
+            phoneE164: true,
             identities: {
-              where: { connectionId: undefined },
+              select: { connectionId: true, externalContactId: true },
             },
           },
         },
@@ -131,10 +193,7 @@ export async function messagesRoutes(app: FastifyInstance): Promise<void> {
       throw new AppError(404, 'CONVERSATION_NOT_FOUND', 'Conversa não encontrada.');
     }
 
-    const senderUser = await prisma.user.findFirst({
-      where: { id: tenant.userId, organizationId: tenant.organizationId },
-      select: { id: true, name: true },
-    });
+    const senderDisplayName = tenant.name ?? 'Atendente';
 
     let content = '';
     let visibility: MessageVisibility = MessageVisibility.PUBLIC;
@@ -168,20 +227,16 @@ export async function messagesRoutes(app: FastifyInstance): Promise<void> {
       visibility = parsed.visibility as MessageVisibility;
     }
 
-    // Resolve o JID do WhatsApp para envio real quando a mensagem é pública
+    // Resolve o JID do WhatsApp para envio real quando a mensagem é pública (sem query extra)
     let externalId: string | null = null;
-    let deliveryStatus: MessageDeliveryStatus = MessageDeliveryStatus.SENT;
+    const deliveryStatus: MessageDeliveryStatus = MessageDeliveryStatus.SENT;
 
     if (
       visibility === MessageVisibility.PUBLIC &&
       conv.connection.channel === ChannelType.WHATSAPP &&
       conv.connection.provider === ConnectionProvider.BAILEYS
     ) {
-      const identity = await prisma.contactIdentity.findFirst({
-        where: { contactId: conv.contactId, connectionId: conv.connectionId },
-        select: { externalContactId: true },
-      });
-
+      const identity = conv.contact.identities.find((i) => i.connectionId === conv.connectionId);
       const digits = (conv.contact.phoneE164 || '').replace(/\D/g, '');
       const targetJid = identity?.externalContactId || (digits ? `${digits}@s.whatsapp.net` : null);
 
@@ -224,21 +279,36 @@ export async function messagesRoutes(app: FastifyInstance): Promise<void> {
       : MessageContentType.TEXT;
 
     const now = new Date();
-    const saved = await prisma.message.create({
-      data: {
-        conversationId: conv.id,
-        externalId,
-        direction: MessageDirection.OUTGOING,
-        visibility,
-        senderType: MessageSenderType.AGENT,
-        senderUserId: tenant.userId,
-        senderName: senderUser?.name ?? 'Atendente',
-        content,
-        contentType,
-        deliveryStatus,
-        createdAt: now,
-      },
-    });
+    const createData = {
+      conversationId: conv.id,
+      externalId,
+      direction: MessageDirection.OUTGOING,
+      visibility,
+      senderType: MessageSenderType.AGENT,
+      senderUserId: tenant.userId,
+      senderName: senderDisplayName,
+      content,
+      contentType,
+      deliveryStatus,
+      createdAt: now,
+    };
+
+    // Upsert evita P2002 caso o eco do Baileys (fromMe: true) chegue antes do INSERT
+    const saved = externalId
+      ? await prisma.message.upsert({
+        where: {
+          conversationId_externalId: {
+            conversationId: conv.id,
+            externalId,
+          },
+        },
+        update: {
+          senderUserId: tenant.userId,
+          senderName: senderDisplayName,
+        },
+        create: createData,
+      })
+      : await prisma.message.create({ data: createData });
 
     // Salva anexo no Supabase Storage se houver arquivo
     let attachmentResponse: {
@@ -259,24 +329,20 @@ export async function messagesRoutes(app: FastifyInstance): Promise<void> {
           buffer: filePayload.buffer,
         });
 
-        let signedUrl: string | null = null;
-        try {
-          signedUrl = await storageService.getSignedUrl(uploaded.bucket, uploaded.storagePath, 3600);
-        } catch {
-          signedUrl = null;
-        }
-
-        const att = await prisma.messageAttachment.create({
-          data: {
-            messageId: saved.id,
-            storageBucket: uploaded.bucket,
-            storagePath: uploaded.storagePath,
-            publicUrl: uploaded.publicUrl,
-            fileName: filePayload.fileName,
-            mimeType: filePayload.mimeType,
-            sizeBytes: filePayload.buffer.length,
-          },
-        });
+        const [signedUrl, att] = await Promise.all([
+          getCachedSignedUrl(uploaded.bucket, uploaded.storagePath),
+          prisma.messageAttachment.create({
+            data: {
+              messageId: saved.id,
+              storageBucket: uploaded.bucket,
+              storagePath: uploaded.storagePath,
+              publicUrl: uploaded.publicUrl,
+              fileName: filePayload.fileName,
+              mimeType: filePayload.mimeType,
+              sizeBytes: filePayload.buffer.length,
+            },
+          }),
+        ]);
 
         attachmentResponse = {
           id: att.id,
@@ -290,7 +356,8 @@ export async function messagesRoutes(app: FastifyInstance): Promise<void> {
       }
     }
 
-    await prisma.conversation.update({
+    // Atualiza conversa e retorna payload serializado em um único round-trip
+    const updatedConvRecord = await prisma.conversation.update({
       where: { id: conv.id },
       data: {
         lastMessageAt: now,
@@ -305,6 +372,7 @@ export async function messagesRoutes(app: FastifyInstance): Promise<void> {
             ? Math.max(1, Math.round((now.getTime() - conv.createdAt.getTime()) / 1000))
             : undefined,
       },
+      include: CONVERSATION_CLIENT_INCLUDE,
     });
 
     const formattedMsg = {
@@ -320,15 +388,16 @@ export async function messagesRoutes(app: FastifyInstance): Promise<void> {
       createdAt: saved.createdAt.toISOString(),
     };
 
+    const updatedConv = formatConversationForClient(updatedConvRecord);
+
+    apiCache.invalidateConversationMessages(tenant.organizationId, conv.id);
+    apiCache.invalidateOrgConversations(tenant.organizationId);
+
     emitToOrganization(tenant.organizationId, 'message:created', {
       conversationId: conv.id,
       message: formattedMsg,
     });
-
-    const updatedConv = await serializeConversationForClient(conv.id);
-    if (updatedConv) {
-      emitToOrganization(tenant.organizationId, 'conversation:updated', updatedConv);
-    }
+    emitToOrganization(tenant.organizationId, 'conversation:updated', updatedConv);
 
     return reply.status(201).send({ message: formattedMsg, conversation: updatedConv });
   });

@@ -14,8 +14,21 @@ export interface AuthJwtPayload {
 export interface TenantContext {
   organizationId: string;
   userId: string;
+  name?: string;
   email: string;
   role: UserRole;
+}
+
+const AUTH_CACHE_TTL_MS = 60_000; // 60 segundos — evita 1 round-trip ao Supabase por requisição
+const AUTH_CACHE_MAX_SIZE = 1000;
+const authUserCache = new Map<string, { tenant: TenantContext; expiresAt: number }>();
+
+export function invalidateAuthUserCache(organizationId?: string, userId?: string): void {
+  if (!organizationId || !userId) {
+    authUserCache.clear();
+    return;
+  }
+  authUserCache.delete(`${organizationId}:${userId}`);
 }
 
 declare module '@fastify/jwt' {
@@ -56,6 +69,14 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
     });
   }
 
+  const cacheKey = `${payload.organizationId}:${payload.sub}`;
+  const now = Date.now();
+  const cached = authUserCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) {
+    request.tenant = cached.tenant;
+    return;
+  }
+
   const activeUser = await prisma.user.findFirst({
     where: {
       id: payload.sub,
@@ -65,24 +86,34 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
     select: {
       id: true,
       organizationId: true,
+      name: true,
       email: true,
       role: true,
     },
   });
 
   if (!activeUser) {
+    authUserCache.delete(cacheKey);
     return reply.status(401).send({
       error: 'ACCOUNT_INACTIVE',
       message: 'Usuário inativo, revogado ou não pertence à organização informada.',
     });
   }
 
-  request.tenant = {
+  const tenant: TenantContext = {
     organizationId: activeUser.organizationId,
     userId: activeUser.id,
+    name: activeUser.name,
     email: activeUser.email,
     role: activeUser.role,
   };
+
+  if (authUserCache.size >= AUTH_CACHE_MAX_SIZE) {
+    authUserCache.clear();
+  }
+  authUserCache.set(cacheKey, { tenant, expiresAt: now + AUTH_CACHE_TTL_MS });
+
+  request.tenant = tenant;
 }
 
 /**

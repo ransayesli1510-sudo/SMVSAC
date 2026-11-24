@@ -2,10 +2,12 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Boom } from '@hapi/boom';
 import {
+  ALL_WA_PATCH_NAMES,
   DisconnectReason,
   fetchLatestBaileysVersion,
   makeWASocket,
   useMultiFileAuthState,
+  type Contact as WaContact,
   type WASocket,
 } from '@whiskeysockets/baileys';
 import QRCode from 'qrcode';
@@ -13,11 +15,13 @@ import pino from 'pino';
 import { ChannelType, ConnectionProvider, ConnectionStatus } from '@prisma/client';
 
 import { prisma } from '../../shared/database/prisma.js';
-import { formatPhoneFromJid } from '../../shared/formatters/ticket.js';
+import { formatPhoneFromJid, isGroupJid, isLidJid } from '../../shared/formatters/ticket.js';
 import { emitToOrganization } from '../../realtime/socket.js';
 import {
+  enqueueMissingAvatarsForOrganization,
   handleWhatsAppStatusUpdates,
   processWhatsAppMessage,
+  syncWhatsAppContactsBatch,
   syncWhatsAppHistory,
 } from './whatsapp.sync.js';
 
@@ -38,6 +42,9 @@ interface SessionEntry {
   paused: boolean;
   intentionalClose: boolean;
   reconnectTimer: NodeJS.Timeout | null;
+  lidToPn: Map<string, string>;
+  knownNames: Map<string, string>;
+  knownContacts: Map<string, Partial<WaContact>>;
 }
 
 const SESSIONS_ROOT = path.resolve(process.cwd(), '.baileys_sessions');
@@ -54,6 +61,7 @@ class WhatsAppSessionManager {
     status: RuntimeSessionStatus;
     qrDataUrl: string | null;
     identifier: string | null;
+    organizationId?: string;
   } {
     const entry = this.sessions.get(connectionId);
     if (!entry) {
@@ -63,7 +71,43 @@ class WhatsAppSessionManager {
       status: entry.status,
       qrDataUrl: entry.qrDataUrl,
       identifier: entry.identifier,
+      organizationId: entry.organizationId,
     };
+  }
+
+  getActiveSessionForOrganization(
+    organizationId: string,
+    connectionId?: string
+  ): {
+    connectionId: string;
+    socket: WASocket;
+    lidToPn: Map<string, string>;
+    knownNames: Map<string, string>;
+  } | null {
+    if (connectionId) {
+      const entry = this.sessions.get(connectionId);
+      if (entry && entry.organizationId === organizationId && entry.socket && entry.status === 'CONNECTED') {
+        return {
+          connectionId: entry.connectionId,
+          socket: entry.socket,
+          lidToPn: entry.lidToPn,
+          knownNames: entry.knownNames,
+        };
+      }
+      return null;
+    }
+
+    for (const entry of this.sessions.values()) {
+      if (entry.organizationId === organizationId && entry.socket && entry.status === 'CONNECTED') {
+        return {
+          connectionId: entry.connectionId,
+          socket: entry.socket,
+          lidToPn: entry.lidToPn,
+          knownNames: entry.knownNames,
+        };
+      }
+    }
+    return null;
   }
 
   async startSession(connectionId: string, organizationId: string): Promise<void> {
@@ -114,6 +158,9 @@ class WhatsAppSessionManager {
       paused: false,
       intentionalClose: false,
       reconnectTimer: null,
+      lidToPn: existing?.lidToPn ?? new Map<string, string>(),
+      knownNames: existing?.knownNames ?? new Map<string, string>(),
+      knownContacts: existing?.knownContacts ?? new Map<string, Partial<WaContact>>(),
     };
     this.sessions.set(connectionId, entry);
 
@@ -128,7 +175,7 @@ class WhatsAppSessionManager {
       auth: state,
       logger: baileysLogger,
       browser: ['SMV Sac', 'Chrome', '1.0.0'],
-      syncFullHistory: false,
+      syncFullHistory: true,
       markOnlineOnConnect: false,
     });
 
@@ -190,6 +237,16 @@ class WhatsAppSessionManager {
           status: entry.status,
           identifier: formattedPhone,
         });
+
+        // Enfileira automaticamente fotos de perfil pendentes e limpa contatos @lid legados
+        void enqueueMissingAvatarsForOrganization({
+          organizationId,
+          connectionId,
+          sock,
+          lidToPn: entry.lidToPn,
+          knownNames: entry.knownNames,
+          force: true,
+        });
       }
 
       if (connection === 'close') {
@@ -203,7 +260,7 @@ class WhatsAppSessionManager {
         if (isLoggedOut) {
           entry.status = 'DISCONNECTED';
           entry.socket = null;
-          await fs.rm(sessionDir, { recursive: true, force: true }).catch(() => {});
+          await fs.rm(sessionDir, { recursive: true, force: true }).catch(() => { });
           await prisma.connection.updateMany({
             where: { id: connectionId, organizationId },
             data: { status: ConnectionStatus.DISCONNECTED },
@@ -229,15 +286,112 @@ class WhatsAppSessionManager {
       }
     });
 
+    // Mantém mapa em memória de LID -> PN e nomes reais de contatos/grupos
+    sock.ev.on('lid-mapping.update', (mapping) => {
+      if (mapping.lid && mapping.pn) {
+        const pnJid = mapping.pn.includes('@') ? mapping.pn : `${mapping.pn.replace(/\D/g, '')}@s.whatsapp.net`;
+        entry.lidToPn.set(mapping.lid, pnJid);
+      }
+    });
+
+    const absorbContacts = (contacts: Array<Partial<WaContact>>) => {
+      for (const c of contacts) {
+        if (!c.id) continue;
+        const prev = entry.knownContacts.get(c.id) ?? {};
+        entry.knownContacts.set(c.id, { ...prev, ...c });
+
+        const label = c.name || c.notify || '';
+        const pnRaw = c.phoneNumber || (!isLidJid(c.id) && !isGroupJid(c.id) ? c.id : null);
+        const pnJid = pnRaw
+          ? pnRaw.includes('@')
+            ? pnRaw
+            : `${pnRaw.replace(/\D/g, '')}@s.whatsapp.net`
+          : null;
+        if (c.lid && pnJid) entry.lidToPn.set(c.lid, pnJid);
+        if (isLidJid(c.id) && pnJid) entry.lidToPn.set(c.id, pnJid);
+        if (label) {
+          entry.knownNames.set(c.id, label);
+          if (c.lid) entry.knownNames.set(c.lid, label);
+          if (pnJid) entry.knownNames.set(pnJid, label);
+        }
+      }
+    };
+
+    sock.ev.on('contacts.upsert', (contacts) => {
+      absorbContacts(contacts);
+      void syncWhatsAppContactsBatch({
+        organizationId,
+        connectionId,
+        contacts,
+        lidToPn: entry.lidToPn,
+        emitEvent: true,
+      }).catch((err) => console.warn('[WhatsApp] Falha ao salvar contacts.upsert:', err));
+    });
+
+    sock.ev.on('contacts.update', (updates) => {
+      absorbContacts(updates);
+      const enriched = updates
+        .map((u) => (u.id ? entry.knownContacts.get(u.id) ?? u : u))
+        .filter((u) => Boolean(u.id));
+      if (enriched.length > 0) {
+        void syncWhatsAppContactsBatch({
+          organizationId,
+          connectionId,
+          contacts: enriched,
+          lidToPn: entry.lidToPn,
+          emitEvent: true,
+        }).catch((err) => console.warn('[WhatsApp] Falha ao salvar contacts.update:', err));
+      }
+    });
+
+    sock.ev.on('groups.upsert', (groups) => {
+      for (const g of groups) {
+        if (g.id && g.subject) {
+          entry.knownNames.set(g.id, g.subject);
+        }
+      }
+    });
+
+    sock.ev.on('groups.update', (groups) => {
+      for (const g of groups) {
+        if (g.id && g.subject) {
+          entry.knownNames.set(g.id, g.subject);
+        }
+      }
+    });
+
     // Sincronização inicial de conversas e mensagens recentes ao conectar
     sock.ev.on('messaging-history.set', (history) => {
+      for (const m of history.lidPnMappings ?? []) {
+        if (m.lid && m.pn) {
+          const pnJid = m.pn.includes('@') ? m.pn : `${m.pn.replace(/\D/g, '')}@s.whatsapp.net`;
+          entry.lidToPn.set(m.lid, pnJid);
+        }
+      }
+      for (const c of history.contacts ?? []) {
+        if (c.id) {
+          const prev = entry.knownContacts.get(c.id) ?? {};
+          entry.knownContacts.set(c.id, { ...prev, ...c });
+        }
+        const label = c.name || c.notify || '';
+        if (label && c.id) entry.knownNames.set(c.id, label);
+        if (label && c.lid) entry.knownNames.set(c.lid, label);
+      }
+      for (const ch of history.chats ?? []) {
+        if (ch.id && ch.name) entry.knownNames.set(ch.id, ch.name);
+      }
+
       void syncWhatsAppHistory({
         organizationId,
         connectionId,
         defaultDepartmentId: conn.defaultDepartmentId,
+        sock,
         chats: history.chats,
         contacts: history.contacts,
         messages: history.messages,
+        lidPnMappings: history.lidPnMappings,
+        knownNames: entry.knownNames,
+        knownLidToPn: entry.lidToPn,
       });
     });
 
@@ -247,11 +401,33 @@ class WhatsAppSessionManager {
       const isLive = type === 'notify';
       for (const msg of messages) {
         try {
+          const jid = msg.key?.remoteJid;
+          let nameHint = jid ? entry.knownNames.get(jid) ?? null : null;
+          const pnHint = jid ? entry.lidToPn.get(jid) ?? null : null;
+          if (!nameHint && pnHint) {
+            nameHint = entry.knownNames.get(pnHint) ?? null;
+          }
+          // Para grupos sem assunto em cache, busca subject do grupo em segundo plano leve
+          if (jid && isGroupJid(jid) && !nameHint) {
+            try {
+              const meta = await sock.groupMetadata(jid);
+              if (meta?.subject) {
+                nameHint = meta.subject;
+                entry.knownNames.set(jid, meta.subject);
+              }
+            } catch {
+              // Ignora se não conseguir ler metadados do grupo
+            }
+          }
+
           await processWhatsAppMessage({
             organizationId,
             connectionId,
             defaultDepartmentId: conn.defaultDepartmentId,
             msg,
+            sock,
+            contactNameHint: nameHint,
+            phoneJidHint: pnHint,
             downloadMedia: isLive,
             emitRealtime: true,
           });
@@ -269,6 +445,67 @@ class WhatsAppSessionManager {
 
   async restartSession(connectionId: string, organizationId: string): Promise<void> {
     await this.startSession(connectionId, organizationId);
+  }
+
+  /**
+   * Força a ressincronização da agenda de contatos no Baileys (resyncAppState)
+   * e persiste imediatamente os contatos já recebidos na sessão em lotes de 100.
+   */
+  async syncContacts(
+    connectionId: string,
+    organizationId: string
+  ): Promise<{ importedCount: number; updatedCount: number; totalContacts: number }> {
+    const entry = this.sessions.get(connectionId);
+    if (!entry || entry.organizationId !== organizationId || !entry.socket || entry.status !== 'CONNECTED') {
+      throw new Error('Conexão WhatsApp não está conectada no momento. Conecte via QR Code antes de sincronizar contatos.');
+    }
+
+    // Dispara ressincronização do AppState (contatos, nomes salvos e metadados) com timeout de segurança
+    try {
+      await Promise.race([
+        entry.socket.resyncAppState(ALL_WA_PATCH_NAMES, false),
+        new Promise<void>((resolve) => setTimeout(resolve, 8000)),
+      ]);
+    } catch (err) {
+      console.warn('[WhatsApp] Aviso ao executar resyncAppState:', err);
+    }
+
+    // Persiste imediatamente todos os contatos acumulados na sessão
+    const batchContacts = Array.from(entry.knownContacts.values());
+    const batchResult = await syncWhatsAppContactsBatch({
+      organizationId,
+      connectionId,
+      contacts: batchContacts,
+      lidToPn: entry.lidToPn,
+      emitEvent: false,
+    });
+
+    // Também dispara busca de fotos de perfil em segundo plano
+    void enqueueMissingAvatarsForOrganization({
+      organizationId,
+      connectionId,
+      sock: entry.socket,
+      lidToPn: entry.lidToPn,
+      knownNames: entry.knownNames,
+      force: true,
+    });
+
+    const totalContacts = await prisma.contact.count({
+      where: { organizationId },
+    });
+
+    emitToOrganization(organizationId, 'whatsapp:contacts_synced', {
+      connectionId,
+      importedCount: batchResult.importedCount,
+      updatedCount: batchResult.updatedCount,
+      totalContacts,
+    });
+
+    return {
+      importedCount: batchResult.importedCount,
+      updatedCount: batchResult.updatedCount,
+      totalContacts,
+    };
   }
 
   async setPaused(connectionId: string, organizationId: string, paused: boolean): Promise<void> {
@@ -319,7 +556,7 @@ class WhatsAppSessionManager {
     }
 
     if (clearAuth) {
-      await fs.rm(this.getSessionDir(connectionId), { recursive: true, force: true }).catch(() => {});
+      await fs.rm(this.getSessionDir(connectionId), { recursive: true, force: true }).catch(() => { });
     }
 
     await prisma.connection.updateMany({

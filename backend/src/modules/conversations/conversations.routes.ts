@@ -1,5 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import {
+  ChannelType,
+  ConnectionStatus,
   ConversationEventType,
   ConversationStatus,
   MessageDirection,
@@ -9,11 +11,17 @@ import {
 import { z } from 'zod';
 
 import { prisma } from '../../shared/database/prisma.js';
+import { apiCache } from '../../shared/cache/api-cache.js';
 import { authenticate, getTenantContext } from '../../shared/http/authenticate.js';
 import { AppError } from '../../shared/http/errors.js';
 import { formatTicketNumber } from '../../shared/formatters/ticket.js';
 import { emitToOrganization } from '../../realtime/socket.js';
-import { serializeConversationForClient } from '../whatsapp/whatsapp.sync.js';
+import { whatsappManager } from '../whatsapp/whatsapp.manager.js';
+import {
+  CONVERSATION_CLIENT_INCLUDE,
+  enqueueMissingAvatarsForOrganization,
+  formatConversationForClient,
+} from '../whatsapp/whatsapp.sync.js';
 
 const listConversationsQuerySchema = z.object({
   tab: z.enum(['mine', 'queue', 'all']).default('all'),
@@ -33,6 +41,12 @@ const assignConversationSchema = z.object({
 
 const updateStatusSchema = z.object({
   status: z.enum(['OPEN', 'RESOLVED']),
+});
+
+const createConversationSchema = z.object({
+  contactId: z.string().uuid('Selecione um contato válido.'),
+  connectionId: z.string().uuid().optional(),
+  departmentId: z.string().uuid().optional(),
 });
 
 export async function conversationsRoutes(app: FastifyInstance): Promise<void> {
@@ -73,6 +87,31 @@ export async function conversationsRoutes(app: FastifyInstance): Promise<void> {
     const tenant = getTenantContext(request);
     const query = listConversationsQuerySchema.parse(request.query);
 
+    // Enfileira em segundo plano (com throttle) os contatos/grupos ainda sem avatarUrl
+    const activeSession = whatsappManager.getActiveSessionForOrganization(tenant.organizationId);
+    if (activeSession) {
+      void enqueueMissingAvatarsForOrganization({
+        organizationId: tenant.organizationId,
+        connectionId: activeSession.connectionId,
+        sock: activeSession.socket,
+        lidToPn: activeSession.lidToPn,
+        knownNames: activeSession.knownNames,
+      });
+    }
+
+    const cacheParams = {
+      tab: query.tab,
+      status: query.status,
+      sort: query.sort,
+      q: query.q,
+      userId: tenant.userId,
+    };
+
+    const cached = apiCache.getConversations(tenant.organizationId, cacheParams);
+    if (cached) {
+      return reply.send({ conversations: cached });
+    }
+
     const where: Record<string, unknown> = {
       organizationId: tenant.organizationId,
     };
@@ -106,18 +145,173 @@ export async function conversationsRoutes(app: FastifyInstance): Promise<void> {
             ? { lastMessageAt: 'asc' as const }
             : { lastMessageAt: 'desc' as const };
 
+    // Consulta única com include seletivo (elimina N+1 e alimenta o cache em memória)
     const rows = await prisma.conversation.findMany({
       where,
       orderBy,
       take: 100,
-      select: { id: true },
+      include: CONVERSATION_CLIENT_INCLUDE,
     });
 
-    const serialized = (
-      await Promise.all(rows.map((r) => serializeConversationForClient(r.id)))
-    ).filter((item): item is NonNullable<typeof item> => item !== null);
+    const serialized = rows.map(formatConversationForClient);
+    apiCache.setConversations(tenant.organizationId, cacheParams, serialized);
 
     return reply.send({ conversations: serialized });
+  });
+
+  // POST /api/v1/conversations — abre conversa existente (OPEN/PENDING) ou cria novo chamado para o contato
+  app.post('/', async (request, reply) => {
+    const tenant = getTenantContext(request);
+    const input = createConversationSchema.parse(request.body);
+
+    const contact = await prisma.contact.findFirst({
+      where: { id: input.contactId, organizationId: tenant.organizationId },
+      select: {
+        id: true,
+        name: true,
+        phoneE164: true,
+        identities: {
+          select: {
+            connectionId: true,
+            externalContactId: true,
+            connection: {
+              select: { id: true, status: true, channel: true, defaultDepartmentId: true },
+            },
+          },
+        },
+      },
+    });
+
+    if (!contact) {
+      throw new AppError(404, 'CONTACT_NOT_FOUND', 'Contato não encontrado nesta organização.');
+    }
+
+    // 1. Se já existir conversa OPEN ou PENDING para este contato (e conexão, se informada), retorna imediatamente
+    const existingConv = await prisma.conversation.findFirst({
+      where: {
+        organizationId: tenant.organizationId,
+        contactId: contact.id,
+        ...(input.connectionId ? { connectionId: input.connectionId } : {}),
+        status: { in: [ConversationStatus.OPEN, ConversationStatus.PENDING] },
+      },
+      orderBy: { lastMessageAt: 'desc' },
+      include: CONVERSATION_CLIENT_INCLUDE,
+    });
+
+    if (existingConv) {
+      return reply.status(200).send({
+        conversation: formatConversationForClient(existingConv),
+        created: false,
+      });
+    }
+
+    // 2. Resolve a conexão ideal (explícita -> identidade do contato -> WhatsApp ativa -> qualquer ativa)
+    let connection: { id: string; defaultDepartmentId: string | null } | null = null;
+
+    if (input.connectionId) {
+      connection = await prisma.connection.findFirst({
+        where: { id: input.connectionId, organizationId: tenant.organizationId },
+        select: { id: true, defaultDepartmentId: true },
+      });
+      if (!connection) {
+        throw new AppError(404, 'CONNECTION_NOT_FOUND', 'Conexão não encontrada.');
+      }
+    } else {
+      const preferredIdentity =
+        contact.identities.find(
+          (i) => i.connection.channel === ChannelType.WHATSAPP && i.connection.status === ConnectionStatus.ACTIVE
+        ) ?? contact.identities[0];
+
+      if (preferredIdentity) {
+        connection = {
+          id: preferredIdentity.connection.id,
+          defaultDepartmentId: preferredIdentity.connection.defaultDepartmentId,
+        };
+      } else {
+        connection =
+          (await prisma.connection.findFirst({
+            where: {
+              organizationId: tenant.organizationId,
+              channel: ChannelType.WHATSAPP,
+              status: ConnectionStatus.ACTIVE,
+            },
+            orderBy: { updatedAt: 'desc' },
+            select: { id: true, defaultDepartmentId: true },
+          })) ??
+          (await prisma.connection.findFirst({
+            where: { organizationId: tenant.organizationId },
+            orderBy: { createdAt: 'desc' },
+            select: { id: true, defaultDepartmentId: true },
+          }));
+      }
+    }
+
+    if (!connection) {
+      throw new AppError(
+        400,
+        'NO_CONNECTION_AVAILABLE',
+        'Conecte um canal (ex.: WhatsApp) antes de iniciar uma nova conversa.'
+      );
+    }
+
+    // Garante vínculo contact_identities caso o contato tenha phoneE164 mas ainda não tenha identidade nesta conexão
+    const hasIdentityForConn = contact.identities.some((i) => i.connectionId === connection!.id);
+    if (!hasIdentityForConn && contact.phoneE164) {
+      const digits = contact.phoneE164.replace(/\D/g, '');
+      if (digits.length >= 8 && digits.length <= 15 && !(digits.length === 15 && digits.startsWith('1'))) {
+        await prisma.contactIdentity
+          .upsert({
+            where: {
+              connectionId_externalContactId: {
+                connectionId: connection.id,
+                externalContactId: `${digits}@s.whatsapp.net`,
+              },
+            },
+            update: {},
+            create: {
+              contactId: contact.id,
+              connectionId: connection.id,
+              externalContactId: `${digits}@s.whatsapp.net`,
+            },
+          })
+          .catch(() => {});
+      }
+    }
+
+    let departmentId = input.departmentId ?? connection.defaultDepartmentId;
+    if (input.departmentId) {
+      const dept = await prisma.department.findFirst({
+        where: { id: input.departmentId, organizationId: tenant.organizationId },
+        select: { id: true },
+      });
+      if (!dept) {
+        throw new AppError(404, 'DEPARTMENT_NOT_FOUND', 'Departamento não encontrado.');
+      }
+      departmentId = dept.id;
+    }
+
+    const createdConv = await prisma.conversation.create({
+      data: {
+        organizationId: tenant.organizationId,
+        connectionId: connection.id,
+        contactId: contact.id,
+        departmentId,
+        assigneeId: tenant.userId,
+        status: ConversationStatus.OPEN,
+        lastMessageAt: new Date(),
+      },
+      include: CONVERSATION_CLIENT_INCLUDE,
+    });
+
+    const formatted = formatConversationForClient(createdConv);
+    apiCache.invalidateOrgConversations(tenant.organizationId);
+    apiCache.invalidateOrgContacts(tenant.organizationId);
+    emitToOrganization(tenant.organizationId, 'conversation:updated', formatted);
+
+    return reply.status(201).send({
+      conversation: formatted,
+      created: true,
+    });
   });
 
   // GET /api/v1/conversations/:id
@@ -125,16 +319,15 @@ export async function conversationsRoutes(app: FastifyInstance): Promise<void> {
     const tenant = getTenantContext(request);
     const { id } = request.params as { id: string };
 
-    const exists = await prisma.conversation.findFirst({
+    const row = await prisma.conversation.findFirst({
       where: { id, organizationId: tenant.organizationId },
-      select: { id: true },
+      include: CONVERSATION_CLIENT_INCLUDE,
     });
-    if (!exists) {
+    if (!row) {
       throw new AppError(404, 'CONVERSATION_NOT_FOUND', 'Conversa não encontrada.');
     }
 
-    const conversation = await serializeConversationForClient(exists.id);
-    return reply.send({ conversation });
+    return reply.send({ conversation: formatConversationForClient(row) });
   });
 
   // POST /api/v1/conversations/:id/read — zera unreadCount
@@ -147,6 +340,8 @@ export async function conversationsRoutes(app: FastifyInstance): Promise<void> {
       data: { unreadCount: 0 },
     });
 
+    apiCache.invalidateOrgConversations(tenant.organizationId);
+
     return reply.send({ ok: true });
   });
 
@@ -156,63 +351,53 @@ export async function conversationsRoutes(app: FastifyInstance): Promise<void> {
     const { id } = request.params as { id: string };
     const input = assignConversationSchema.parse(request.body);
 
-    const existing = await prisma.conversation.findFirst({
-      where: { id, organizationId: tenant.organizationId },
-      include: { contact: { select: { name: true } } },
-    });
+    const [existing, dept, targetUser] = await Promise.all([
+      prisma.conversation.findFirst({
+        where: { id, organizationId: tenant.organizationId },
+        select: {
+          id: true,
+          createdAt: true,
+          protocolNumber: true,
+          departmentId: true,
+          assigneeId: true,
+        },
+      }),
+      input.departmentId
+        ? prisma.department.findFirst({
+          where: { id: input.departmentId, organizationId: tenant.organizationId },
+          select: { id: true, name: true },
+        })
+        : input.departmentName
+          ? prisma.department.findFirst({
+            where: { name: input.departmentName, organizationId: tenant.organizationId },
+            select: { id: true, name: true },
+          })
+          : Promise.resolve(null),
+      input.assigneeId
+        ? prisma.user.findFirst({
+          where: { id: input.assigneeId, organizationId: tenant.organizationId, isActive: true },
+          select: { id: true, name: true },
+        })
+        : Promise.resolve(null),
+    ]);
+
     if (!existing) {
       throw new AppError(404, 'CONVERSATION_NOT_FOUND', 'Conversa não encontrada.');
     }
-
-    let departmentId = input.departmentId ?? existing.departmentId;
-    let departmentName = input.departmentName ?? null;
-    if (input.departmentId) {
-      const dept = await prisma.department.findFirst({
-        where: { id: input.departmentId, organizationId: tenant.organizationId },
-        select: { id: true, name: true },
-      });
-      if (!dept) throw new AppError(404, 'DEPARTMENT_NOT_FOUND', 'Departamento não encontrado.');
-      departmentId = dept.id;
-      departmentName = dept.name;
-    } else if (input.departmentName) {
-      const dept = await prisma.department.findFirst({
-        where: { name: input.departmentName, organizationId: tenant.organizationId },
-        select: { id: true, name: true },
-      });
-      if (!dept) throw new AppError(404, 'DEPARTMENT_NOT_FOUND', 'Departamento não encontrado.');
-      departmentId = dept.id;
-      departmentName = dept.name;
+    if ((input.departmentId || input.departmentName) && !dept) {
+      throw new AppError(404, 'DEPARTMENT_NOT_FOUND', 'Departamento não encontrado.');
+    }
+    if (input.assigneeId && !targetUser) {
+      throw new AppError(404, 'AGENT_NOT_FOUND', 'Atendente não encontrado nesta organização.');
     }
 
-    let assigneeName = 'Fila do departamento';
-    if (input.assigneeId) {
-      const targetUser = await prisma.user.findFirst({
-        where: { id: input.assigneeId, organizationId: tenant.organizationId, isActive: true },
-        select: { id: true, name: true },
-      });
-      if (!targetUser) {
-        throw new AppError(404, 'AGENT_NOT_FOUND', 'Atendente não encontrado nesta organização.');
-      }
-      assigneeName = targetUser.name;
-    }
-
-    const actor = await prisma.user.findFirst({
-      where: { id: tenant.userId, organizationId: tenant.organizationId },
-      select: { name: true },
-    });
-
+    const departmentId = dept ? dept.id : existing.departmentId;
+    const departmentName = dept ? dept.name : null;
+    const assigneeName = targetUser ? targetUser.name : 'Fila do departamento';
+    const actorName = tenant.name ?? 'Atendente';
     const ticketNumber = formatTicketNumber(existing.createdAt, existing.protocolNumber);
 
-    await prisma.$transaction(async (tx) => {
-      await tx.conversation.update({
-        where: { id: existing.id },
-        data: {
-          departmentId,
-          assigneeId: input.assigneeId === undefined ? existing.assigneeId : input.assigneeId,
-          lastMessageAt: new Date(),
-        },
-      });
-
+    const updatedRecord = await prisma.$transaction(async (tx) => {
       await tx.conversationEvent.create({
         data: {
           conversationId: existing.id,
@@ -238,7 +423,7 @@ export async function conversationsRoutes(app: FastifyInstance): Promise<void> {
             visibility: MessageVisibility.PRIVATE_NOTE,
             senderType: MessageSenderType.AGENT,
             senderUserId: tenant.userId,
-            senderName: `${actor?.name ?? 'Atendente'} (Transferência)`,
+            senderName: `${actorName} (Transferência)`,
             content: input.comment,
           },
         });
@@ -255,12 +440,24 @@ export async function conversationsRoutes(app: FastifyInstance): Promise<void> {
           },
         });
       }
+
+      return tx.conversation.update({
+        where: { id: existing.id },
+        data: {
+          departmentId,
+          assigneeId: input.assigneeId === undefined ? existing.assigneeId : input.assigneeId,
+          lastMessageAt: new Date(),
+        },
+        include: CONVERSATION_CLIENT_INCLUDE,
+      });
     });
 
-    const updated = await serializeConversationForClient(existing.id);
-    if (updated) {
-      emitToOrganization(tenant.organizationId, 'conversation:updated', updated);
+    const updated = formatConversationForClient(updatedRecord);
+    apiCache.invalidateOrgConversations(tenant.organizationId);
+    if (input.comment) {
+      apiCache.invalidateConversationMessages(tenant.organizationId, existing.id);
     }
+    emitToOrganization(tenant.organizationId, 'conversation:updated', updated);
 
     return reply.send({
       ticketNumber,
@@ -276,6 +473,7 @@ export async function conversationsRoutes(app: FastifyInstance): Promise<void> {
 
     const existing = await prisma.conversation.findFirst({
       where: { id, organizationId: tenant.organizationId },
+      select: { id: true, createdAt: true },
     });
     if (!existing) {
       throw new AppError(404, 'CONVERSATION_NOT_FOUND', 'Conversa não encontrada.');
@@ -287,16 +485,7 @@ export async function conversationsRoutes(app: FastifyInstance): Promise<void> {
         ? Math.max(1, Math.round((now.getTime() - existing.createdAt.getTime()) / 1000))
         : null;
 
-    await prisma.$transaction(async (tx) => {
-      await tx.conversation.update({
-        where: { id: existing.id },
-        data: {
-          status: status === 'RESOLVED' ? ConversationStatus.RESOLVED : ConversationStatus.OPEN,
-          resolvedAt: status === 'RESOLVED' ? now : null,
-          resolutionSeconds,
-        },
-      });
-
+    const updatedRecord = await prisma.$transaction(async (tx) => {
       await tx.conversationEvent.create({
         data: {
           conversationId: existing.id,
@@ -306,12 +495,21 @@ export async function conversationsRoutes(app: FastifyInstance): Promise<void> {
             status === 'RESOLVED' ? ConversationEventType.RESOLVED : ConversationEventType.REOPENED,
         },
       });
+
+      return tx.conversation.update({
+        where: { id: existing.id },
+        data: {
+          status: status === 'RESOLVED' ? ConversationStatus.RESOLVED : ConversationStatus.OPEN,
+          resolvedAt: status === 'RESOLVED' ? now : null,
+          resolutionSeconds,
+        },
+        include: CONVERSATION_CLIENT_INCLUDE,
+      });
     });
 
-    const updated = await serializeConversationForClient(existing.id);
-    if (updated) {
-      emitToOrganization(tenant.organizationId, 'conversation:updated', updated);
-    }
+    const updated = formatConversationForClient(updatedRecord);
+    apiCache.invalidateOrgConversations(tenant.organizationId);
+    emitToOrganization(tenant.organizationId, 'conversation:updated', updated);
 
     return reply.send({ conversation: updated });
   });

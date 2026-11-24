@@ -198,6 +198,17 @@ export async function connectionsRoutes(app: FastifyInstance): Promise<void> {
     const tenant = getTenantContext(request);
     const { id } = request.params as { id: string };
 
+    // Fast-path em memória: evita ida ao Supabase durante polling de QR Code
+    const snapshot = whatsappManager.getSnapshot(id);
+    if (snapshot.organizationId === tenant.organizationId) {
+      return reply.send({
+        connectionId: id,
+        status: snapshot.status,
+        qrDataUrl: snapshot.qrDataUrl,
+        identifier: snapshot.identifier,
+      });
+    }
+
     const conn = await prisma.connection.findFirst({
       where: { id, organizationId: tenant.organizationId },
       select: { id: true, identifier: true, status: true },
@@ -207,7 +218,6 @@ export async function connectionsRoutes(app: FastifyInstance): Promise<void> {
       throw new AppError(404, 'CONNECTION_NOT_FOUND', 'Conexão não encontrada.');
     }
 
-    const snapshot = whatsappManager.getSnapshot(conn.id);
     return reply.send({
       connectionId: conn.id,
       status: snapshot.status,
@@ -295,6 +305,46 @@ export async function connectionsRoutes(app: FastifyInstance): Promise<void> {
     }
 
     return reply.send({ ok: true, connectionId: conn.id, action });
+  });
+
+  // POST /api/v1/connections/:id/sync-contacts — força ressincronização da agenda do WhatsApp
+  app.post('/:id/sync-contacts', async (request, reply) => {
+    const tenant = getTenantContext(request);
+    const { id } = request.params as { id: string };
+
+    const conn = await prisma.connection.findFirst({
+      where: { id, organizationId: tenant.organizationId },
+      select: { id: true, name: true, channel: true, provider: true },
+    });
+
+    if (!conn) {
+      throw new AppError(404, 'CONNECTION_NOT_FOUND', 'Conexão não encontrada.');
+    }
+
+    if (conn.channel !== ChannelType.WHATSAPP || conn.provider !== ConnectionProvider.BAILEYS) {
+      throw new AppError(
+        400,
+        'SYNC_CONTACTS_UNSUPPORTED',
+        'A sincronização de agenda está disponível apenas para conexões WhatsApp conectadas.'
+      );
+    }
+
+    try {
+      const result = await whatsappManager.syncContacts(conn.id, tenant.organizationId);
+      return reply.send({
+        ok: true,
+        connectionId: conn.id,
+        connectionName: conn.name,
+        ...result,
+        message: `${result.totalContacts} contato(s) sincronizado(s) na base.`,
+      });
+    } catch (err) {
+      throw new AppError(
+        409,
+        'WHATSAPP_NOT_CONNECTED',
+        err instanceof Error ? err.message : 'Conexão WhatsApp não está conectada.'
+      );
+    }
   });
 
   // POST /api/v1/connections/:id/restart

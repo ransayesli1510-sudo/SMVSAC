@@ -31,10 +31,13 @@
   const state = {
     authenticated: false,
     apiConnected: false,
+    socketConnected: false,
     lgpdAccepted: false,
     pendingUser: null,
     waQrConnectionId: null,
     waQrPollTimer: null,
+    waQrPollInFlight: false,
+    fallbackPollTimer: null,
     currentUser: {
       name: 'Ransay',
       email: 'ransay@supermegavendas.com',
@@ -49,6 +52,17 @@
     convSidebarCollapsed: false,
     searchQuery: '',
     inChatSearch: '',
+    contacts: [],
+    contactsTotal: 0,
+    contactSearchResults: [],
+    contactSearchLoading: false,
+    contactSearchReqSeq: 0,
+    convSearchDebounceTimer: null,
+    newConvResults: [],
+    newConvLoading: false,
+    newConvReqSeq: 0,
+    newConvDebounceTimer: null,
+    contactsTabDebounceTimer: null,
     selectedConvId: DATA.conversations[0].id,
     privateMode: false,
     connTab: 'active', // active | archived
@@ -436,22 +450,26 @@
       lastMessageTs: lastMs,
       waitMinutes,
       labels: Array.isArray(c.labels) ? c.labels : [],
-      contact: c.contact,
+      contact: {
+        ...c.contact,
+        avatarUrl: c.contact?.avatarUrl || existing?.contact?.avatarUrl || null,
+      },
       messages:
         existing?.messages?.length
           ? existing.messages
           : c.lastMessage
             ? [
-                {
-                  id: c.lastMessage.id,
-                  type: c.lastMessage.type,
-                  sender: c.lastMessage.type === 'incoming' ? c.contact.name : 'Você',
-                  text: c.lastMessage.text,
-                  time: formatIsoTime(c.lastMessage.createdAt),
-                },
-              ]
+              {
+                id: c.lastMessage.id,
+                type: c.lastMessage.type,
+                sender: c.lastMessage.type === 'incoming' ? c.contact.name : 'Você',
+                text: c.lastMessage.text,
+                time: formatIsoTime(c.lastMessage.createdAt),
+              },
+            ]
             : [],
       _messagesLoaded: Boolean(existing?._messagesLoaded),
+      _messagesFetchedAt: existing?._messagesFetchedAt || 0,
     };
   }
 
@@ -538,22 +556,317 @@
     }
   }
 
-  async function loadMessagesForConversation(conversationId) {
+  const inflightMessageFetches = new Set();
+
+  async function loadMessagesForConversation(conversationId, { silent = false } = {}) {
     if (!state.apiConnected || !API || !conversationId || typeof conversationId !== 'string') return;
     const conv = state.conversations.find((c) => c.id === conversationId);
     if (!conv || !conv.isRemote) return;
+    if (inflightMessageFetches.has(conversationId)) return;
+    inflightMessageFetches.add(conversationId);
     try {
       const { messages } = await API.getMessages(conversationId);
       if (Array.isArray(messages)) {
-        conv.messages = messages.map(mapBackendMessage);
+        const mapped = messages.map(mapBackendMessage);
+        const prevSig = `${conv.messages.length}:${conv.messages[conv.messages.length - 1]?.id || ''}:${conv.messages[conv.messages.length - 1]?.deliveryStatus || ''}`;
+        const nextSig = `${mapped.length}:${mapped[mapped.length - 1]?.id || ''}:${mapped[mapped.length - 1]?.deliveryStatus || ''}`;
+        conv.messages = mapped;
         conv._messagesLoaded = true;
-        if (state.selectedConvId === conversationId) {
+        conv._messagesFetchedAt = Date.now();
+        if (state.selectedConvId === conversationId && (!silent || prevSig !== nextSig)) {
           renderActiveChat();
         }
       }
     } catch (err) {
       console.warn('[API] Falha ao carregar mensagens:', err);
+    } finally {
+      inflightMessageFetches.delete(conversationId);
     }
+  }
+
+  function updateContactsCountBadge() {
+    const badge = $('#contactsTotalBadge');
+    if (!badge) return;
+    const total = state.apiConnected ? state.contactsTotal || state.contacts.length : state.conversations.length;
+    badge.textContent = total;
+    badge.classList.toggle('hidden', total === 0);
+  }
+
+  async function loadBackendContacts(query = '', limit = 200) {
+    if (!state.apiConnected || !API) return [];
+    try {
+      const data = await API.getContacts({ q: query.trim(), limit });
+      const list = Array.isArray(data.contacts) ? data.contacts : [];
+      if (!query.trim()) {
+        state.contacts = list;
+        state.contactsTotal = typeof data.total === 'number' ? data.total : list.length;
+      } else {
+        state.contacts = list;
+      }
+      updateContactsCountBadge();
+      if (state.view === 'contacts') renderContacts();
+      return list;
+    } catch (err) {
+      console.warn('[API] Falha ao carregar contatos:', err);
+      return [];
+    }
+  }
+
+  async function searchAgendaContactsForSidebar(rawQuery) {
+    const q = (rawQuery || '').trim();
+    const seq = ++state.contactSearchReqSeq;
+
+    if (!q) {
+      state.contactSearchResults = [];
+      state.contactSearchLoading = false;
+      renderConversations();
+      return;
+    }
+
+    if (!state.apiConnected || !API) {
+      const ql = q.toLowerCase();
+      const qd = q.replace(/\D/g, '');
+      state.contactSearchResults = state.conversations
+        .map((c) => ({
+          id: c.contact.id || String(c.id),
+          name: c.contact.name,
+          initials: c.contact.initials,
+          phone: c.contact.phone,
+          email: c.contact.email,
+          avatarUrl: c.contact.avatarUrl || null,
+          connection: c.connection,
+          department: c.department,
+          conversationId: c.id,
+        }))
+        .filter((c) => {
+          const pd = (c.phone || '').replace(/\D/g, '');
+          return (
+            c.name.toLowerCase().includes(ql) ||
+            (c.email || '').toLowerCase().includes(ql) ||
+            (qd.length >= 2 && pd.includes(qd))
+          );
+        });
+      state.contactSearchLoading = false;
+      renderConversations();
+      return;
+    }
+
+    state.contactSearchLoading = true;
+    renderConversations();
+
+    try {
+      const data = await API.getContacts({ q, limit: 30 });
+      if (seq !== state.contactSearchReqSeq) return;
+      state.contactSearchResults = Array.isArray(data.contacts) ? data.contacts : [];
+    } catch (err) {
+      if (seq !== state.contactSearchReqSeq) return;
+      console.warn('[API] Falha ao pesquisar agenda:', err);
+      state.contactSearchResults = [];
+    } finally {
+      if (seq === state.contactSearchReqSeq) {
+        state.contactSearchLoading = false;
+        renderConversations();
+      }
+    }
+  }
+
+  async function openConversationForContact(contact) {
+    if (!contact) return;
+
+    // Fallback offline / demo local
+    if (!state.apiConnected || !API) {
+      const existing = state.conversations.find(
+        (c) =>
+          (contact.conversationId && String(c.id) === String(contact.conversationId)) ||
+          (contact.id && String(c.contact?.id) === String(contact.id)) ||
+          c.contact?.name === contact.name
+      );
+      if (existing) {
+        state.selectedConvId = existing.id;
+        state.tab = 'all';
+        state.statusFilter = 'all';
+        closeNewConversationModal();
+        setView('conversations');
+        setTimeout(() => $('#composerInput')?.focus(), 30);
+      }
+      return;
+    }
+
+    try {
+      const res = await API.openOrCreateConversation({
+        contactId: contact.id,
+        ...(contact.connectionId ? { connectionId: contact.connectionId } : {}),
+      });
+      if (!res?.conversation) {
+        toast('Não foi possível abrir a conversa para este contato.');
+        return;
+      }
+
+      const mapped = mapBackendConversation(res.conversation);
+      const existingIdx = state.conversations.findIndex((c) => c.id === mapped.id);
+      if (existingIdx >= 0) {
+        mapped.messages = state.conversations[existingIdx].messages;
+        mapped._messagesLoaded = state.conversations[existingIdx]._messagesLoaded;
+        mapped._messagesFetchedAt = state.conversations[existingIdx]._messagesFetchedAt;
+        state.conversations[existingIdx] = mapped;
+      } else {
+        state.conversations.unshift(mapped);
+      }
+
+      // Limpa busca para exibir o chat na lista e abre imediatamente na área central
+      state.searchQuery = '';
+      const searchInput = $('#convSearchInput');
+      if (searchInput) searchInput.value = '';
+      state.contactSearchResults = [];
+      state.contactSearchLoading = false;
+      state.tab = 'all';
+      state.statusFilter = mapped.status === 'resolved' ? 'all' : 'open';
+      state.selectedConvId = mapped.id;
+      mapped.unread = 0;
+
+      closeNewConversationModal();
+      setView('conversations');
+
+      // Carrega histórico em segundo plano e foca o cursor no campo de digitar mensagem
+      void loadMessagesForConversation(mapped.id, { silent: Boolean(mapped._messagesLoaded) });
+      setTimeout(() => $('#composerInput')?.focus(), 35);
+
+      if (res.created) {
+        toast(`Nova conversa iniciada (${mapped.ticketNumber}) com ${mapped.contact.name}!`);
+      }
+    } catch (err) {
+      toast(`Erro ao abrir conversa: ${err.message}`);
+    }
+  }
+
+  async function syncWhatsAppContacts(connectionId = null) {
+    if (!state.apiConnected || !API) {
+      toast('Conecte-se ao servidor back-end para sincronizar a agenda do WhatsApp.');
+      return;
+    }
+
+    const targetConn = connectionId
+      ? state.connections.find((c) => c.id === connectionId)
+      : state.connections.find(
+          (c) => c.channel === 'WhatsApp' && c.status === 'active' && c.sessionState === 'connected'
+        ) || state.connections.find((c) => c.channel === 'WhatsApp' && c.status === 'active');
+
+    if (!targetConn) {
+      toast('Nenhuma conexão WhatsApp conectada encontrada. Conecte um WhatsApp via QR Code primeiro.');
+      return;
+    }
+
+    const syncBtn = $('#btnContactsSyncWa');
+    if (syncBtn) syncBtn.disabled = true;
+    toast(`🔄 Sincronizando agenda de contatos de "${targetConn.name}"...`);
+
+    try {
+      const res = await API.syncConnectionContacts(targetConn.id);
+      pushConnectionEvent(
+        targetConn,
+        `Agenda sincronizada (${res.totalContacts ?? 0} contatos na base)`,
+        'success'
+      );
+      await loadBackendContacts($('#contactsSearchInput')?.value || '', 200);
+      if (state.view === 'connections') renderConnections();
+      toast(`✅ Agenda sincronizada! ${res.totalContacts ?? 0} contato(s) disponíveis para busca.`);
+    } catch (err) {
+      toast(`❌ Erro ao sincronizar contatos: ${err.message}`);
+    } finally {
+      if (syncBtn) syncBtn.disabled = false;
+    }
+  }
+
+  function closeNewConversationModal() {
+    const modal = $('#newConversationModal');
+    if (modal) modal.classList.add('hidden');
+  }
+
+  function renderNewConvResults() {
+    const listEl = $('#newConvResultsList');
+    if (!listEl) return;
+
+    if (state.newConvLoading) {
+      listEl.innerHTML = `<div class="conv-section-empty">Buscando contatos na agenda...</div>`;
+      return;
+    }
+
+    if (state.newConvResults.length === 0) {
+      listEl.innerHTML = `<div class="conv-section-empty">Nenhum contato encontrado na agenda. Tente outro nome/telefone ou cadastre um novo contato abaixo.</div>`;
+      return;
+    }
+
+    listEl.innerHTML = state.newConvResults
+      .map(
+        (c) => `
+          <button type="button" class="new-conv-item" data-new-conv-contact="${escapeHtml(c.id)}">
+            <div class="avatar md">${renderAvatarInner(c)}</div>
+            <div class="new-conv-item-info">
+              <div class="new-conv-item-name">${escapeHtml(c.name)}</div>
+              <div class="new-conv-item-meta">${escapeHtml(c.phone || 'WhatsApp')}${c.connection && c.connection !== '-' ? ' • ' + escapeHtml(c.connection) : ''}</div>
+            </div>
+            <span class="agenda-action-chip">${c.conversationId ? 'Abrir chat' : 'Iniciar conversa'}</span>
+          </button>
+        `
+      )
+      .join('');
+
+    $$('[data-new-conv-contact]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const contact = state.newConvResults.find((x) => String(x.id) === String(btn.dataset.newConvContact));
+        if (contact) void openConversationForContact(contact);
+      });
+    });
+  }
+
+  async function searchContactsForNewConvModal(rawQuery = '') {
+    const q = (rawQuery || '').trim();
+    const seq = ++state.newConvReqSeq;
+
+    if (!state.apiConnected || !API) {
+      const ql = q.toLowerCase();
+      state.newConvResults = state.conversations
+        .map((c) => ({
+          id: c.contact.id || String(c.id),
+          name: c.contact.name,
+          initials: c.contact.initials,
+          phone: c.contact.phone,
+          avatarUrl: c.contact.avatarUrl || null,
+          connection: c.connection,
+          conversationId: c.id,
+        }))
+        .filter((c) => !ql || c.name.toLowerCase().includes(ql) || (c.phone || '').toLowerCase().includes(ql));
+      state.newConvLoading = false;
+      renderNewConvResults();
+      return;
+    }
+
+    state.newConvLoading = true;
+    renderNewConvResults();
+
+    try {
+      const data = await API.getContacts({ q, limit: 40 });
+      if (seq !== state.newConvReqSeq) return;
+      state.newConvResults = Array.isArray(data.contacts) ? data.contacts : [];
+    } catch {
+      if (seq !== state.newConvReqSeq) return;
+      state.newConvResults = [];
+    } finally {
+      if (seq === state.newConvReqSeq) {
+        state.newConvLoading = false;
+        renderNewConvResults();
+      }
+    }
+  }
+
+  function openNewConversationModal() {
+    const modal = $('#newConversationModal');
+    if (!modal) return;
+    const inp = $('#newConvSearchInput');
+    if (inp) inp.value = '';
+    modal.classList.remove('hidden');
+    void searchContactsForNewConvModal('');
+    setTimeout(() => inp?.focus(), 25);
   }
 
   function stopWaQrPolling() {
@@ -561,6 +874,33 @@
       clearInterval(state.waQrPollTimer);
       state.waQrPollTimer = null;
     }
+    state.waQrPollInFlight = false;
+  }
+
+  function stopFallbackSyncPolling() {
+    if (state.fallbackPollTimer) {
+      clearInterval(state.fallbackPollTimer);
+      state.fallbackPollTimer = null;
+    }
+  }
+
+  function startFallbackSyncPolling() {
+    // Polling só roda como fallback quando o Socket.IO desconectar
+    if (state.socketConnected || !state.apiConnected || !state.authenticated) {
+      stopFallbackSyncPolling();
+      return;
+    }
+    if (state.fallbackPollTimer) return;
+    state.fallbackPollTimer = setInterval(() => {
+      if (state.socketConnected || !state.apiConnected || !state.authenticated) {
+        stopFallbackSyncPolling();
+        return;
+      }
+      void loadBackendConversations(false);
+      if (state.selectedConvId) {
+        void loadMessagesForConversation(state.selectedConvId);
+      }
+    }, 8000);
   }
 
   function closeWaQrModal() {
@@ -579,6 +919,9 @@
     statusPill.classList.remove('connected');
 
     if (status === 'CONNECTED') {
+      stopWaQrPolling();
+      const completedConnectionId = state.waQrConnectionId;
+      state.waQrConnectionId = null;
       loader.classList.add('hidden');
       img.classList.add('hidden');
       connectedBox.classList.remove('hidden');
@@ -587,16 +930,17 @@
         : 'Sincronizando conversas...';
       statusPill.classList.add('connected');
       statusText.textContent = `Conectado (${identifier || 'WhatsApp'})!`;
-      stopWaQrPolling();
 
-      void loadBackendConnections();
-      setTimeout(() => {
-        void loadBackendConversations(true);
-        closeWaQrModal();
-        state.connSubView = 'list';
-        setView('conversations');
-        toast(`✅ WhatsApp conectado (${identifier || 'Ativo'})! Conversas sincronizando em tempo real.`);
-      }, 1500);
+      if (completedConnectionId) {
+        void loadBackendConnections();
+        setTimeout(() => {
+          void loadBackendConversations(true);
+          closeWaQrModal();
+          state.connSubView = 'list';
+          setView('conversations');
+          toast(`✅ WhatsApp conectado (${identifier || 'Ativo'})! Conversas sincronizando em tempo real.`);
+        }, 1500);
+      }
       return;
     }
 
@@ -621,13 +965,25 @@
         stopWaQrPolling();
         return;
       }
+      const target = state.connections.find((c) => c.id === connectionId);
+      if (target?.sessionState === 'connected') {
+        stopWaQrPolling();
+        return;
+      }
+      if (state.waQrPollInFlight) return;
+      state.waQrPollInFlight = true;
       try {
         const snap = await API.getWhatsAppQr(connectionId);
+        if (snap?.status === 'CONNECTED') {
+          stopWaQrPolling();
+        }
         updateWaQrModalState(snap);
       } catch {
         // Aguarda próximo ciclo
+      } finally {
+        state.waQrPollInFlight = false;
       }
-    }, 2200);
+    }, 2500);
   }
 
   async function openWhatsAppQrModal(existingConn = null) {
@@ -692,10 +1048,22 @@
       console.warn('[API] Falha ao carregar metadados:', err);
     }
 
-    await Promise.all([loadBackendConnections(), loadBackendConversations(true)]);
+    await Promise.all([
+      loadBackendConnections(),
+      loadBackendConversations(true),
+      loadBackendContacts('', 200),
+    ]);
 
     // Conecta Socket.IO autenticado para receber QR Code, status e mensagens em tempo real!
     API.connectSocket({
+      onConnect() {
+        state.socketConnected = true;
+        stopFallbackSyncPolling();
+      },
+      onDisconnect() {
+        state.socketConnected = false;
+        startFallbackSyncPolling();
+      },
       onWhatsAppQr(payload) {
         const target = state.connections.find((c) => c.id === payload.connectionId);
         if (target) {
@@ -711,6 +1079,7 @@
         const target = state.connections.find((c) => c.id === payload.connectionId);
         if (target) {
           if (payload.status === 'CONNECTED') {
+            stopWaQrPolling();
             target.sessionState = 'connected';
             target.status = 'active';
             if (payload.identifier) target.identifier = payload.identifier;
@@ -733,6 +1102,65 @@
         void loadBackendConversations(false);
         if (payload?.syncedMessages > 0) {
           toast(`📥 ${payload.syncedMessages} mensagens sincronizadas do WhatsApp!`);
+        }
+      },
+      onContactAvatarUpdated(payload) {
+        if (!payload?.avatarUrl) return;
+        let touched = false;
+        let activeMatched = false;
+        state.conversations.forEach((c) => {
+          if (
+            (payload.contactId && c.contact?.id === payload.contactId) ||
+            (payload.conversationId && c.id === payload.conversationId)
+          ) {
+            c.contact.avatarUrl = payload.avatarUrl;
+            touched = true;
+            if (c.id === state.selectedConvId) activeMatched = true;
+          }
+        });
+        state.contacts.forEach((ct) => {
+          if (payload.contactId && ct.id === payload.contactId) {
+            ct.avatarUrl = payload.avatarUrl;
+          }
+        });
+        if (!touched) return;
+
+        // Atualiza imediatamente a lista lateral e o cabeçalho + drawer da conversa aberta
+        if (state.view === 'conversations') {
+          state.conversations.forEach((c) => {
+            if (
+              (payload.contactId && c.contact?.id === payload.contactId) ||
+              (payload.conversationId && c.id === payload.conversationId)
+            ) {
+              const rowAvatar = document.querySelector(`.conv-row[data-conv-id="${c.id}"] .avatar`);
+              if (rowAvatar) {
+                rowAvatar.innerHTML = `${renderAvatarInner(c.contact)}<span class="ch-dot ${channelBadgeClass(c.channel)}" title="${escapeHtml(c.channel)}">${channelMiniGlyph(c.channel)}</span>`;
+              }
+            }
+          });
+          if (activeMatched) {
+            const activeConv = getSelectedConv();
+            if (activeConv) {
+              $('#chatAvatar').innerHTML = `${renderAvatarInner(activeConv.contact)}<span class="ch-dot ${channelBadgeClass(activeConv.channel)}">${channelMiniGlyph(activeConv.channel)}</span>`;
+              renderDrawer(activeConv);
+            }
+          }
+        } else if (state.view === 'contacts') {
+          renderContacts();
+        }
+      },
+      onContactsSynced(payload) {
+        if (typeof payload?.totalContacts === 'number') {
+          state.contactsTotal = payload.totalContacts;
+          updateContactsCountBadge();
+        }
+        if (state.view === 'contacts') {
+          void loadBackendContacts($('#contactsSearchInput')?.value || '', 200);
+        } else {
+          void loadBackendContacts('', 200);
+        }
+        if (state.searchQuery.trim()) {
+          void searchAgendaContactsForSidebar(state.searchQuery);
         }
       },
       onConversationUpdated(convPayload) {
@@ -808,7 +1236,12 @@
       state.connSubView = 'list';
       renderConnections();
     }
-    if (viewName === 'contacts') renderContacts();
+    if (viewName === 'contacts') {
+      renderContacts();
+      if (state.apiConnected) {
+        void loadBackendContacts($('#contactsSearchInput')?.value || '', 200);
+      }
+    }
     if (viewName === 'reports') renderReports();
   }
 
@@ -856,6 +1289,14 @@
     });
   }
 
+  function renderAvatarInner(contact) {
+    const initials = escapeHtml(contact?.initials || 'CT');
+    if (contact?.avatarUrl) {
+      return `<img class="avatar-img" src="${escapeHtml(contact.avatarUrl)}" alt="${escapeHtml(contact.name || '')}" loading="lazy" onerror="this.style.display='none';if(this.nextElementSibling)this.nextElementSibling.style.display='inline';" /><span style="display:none">${initials}</span>`;
+    }
+    return `<span>${initials}</span>`;
+  }
+
   function renderConversations() {
     updateGlobalCounts();
 
@@ -864,66 +1305,140 @@
 
     const listEl = $('#conversationList');
     const list = getFilteredConversations();
+    const isSearching = Boolean(state.searchQuery.trim());
 
-    if (list.length === 0) {
+    const renderConvCard = (c) => {
+      const last = [...c.messages].reverse().find((m) => m.type !== 'activity') || c.messages[c.messages.length - 1];
+      const prefix = last?.type === 'outgoing' ? '✓✓ ' : last?.type === 'private' ? '🔒 ' : '';
+      const attLabel = last?.attachment
+        ? {
+            document: `📄 ${last.attachment.name || 'Documento'}`,
+            image: '🖼️ Foto',
+            audio: `🎧 ${last.attachment.name || 'Áudio'}`,
+            contact: `👤 ${last.attachment.contactName || 'Contato'}`,
+            poll: `📊 Enquete: ${last.attachment.question || ''}`,
+            pix: `💠 Pix ${last.attachment.amount || ''}`,
+            event: `📅 ${last.attachment.title || 'Evento'}`,
+            sticker: 'Figurinha',
+          }[last.attachment.kind] || '📎 Anexo'
+        : '';
+      const preview = last ? `${prefix}${last.text || attLabel}` : '';
+      return `
+        <div class="conv-row ${c.id === state.selectedConvId ? 'active' : ''}" data-conv-id="${c.id}">
+          <div class="avatar md">
+            ${renderAvatarInner(c.contact)}
+            <span class="ch-dot ${channelBadgeClass(c.channel)}" title="${escapeHtml(c.channel)}">${channelMiniGlyph(c.channel)}</span>
+          </div>
+          <div class="conv-row-body">
+            <div class="conv-row-top">
+              <span class="conv-row-name">${escapeHtml(c.contact.name)}</span>
+              <span class="conv-row-time">${escapeHtml(c.updatedAt)}</span>
+            </div>
+            <div class="conv-ticket-tag">${escapeHtml(c.ticketNumber || '')}</div>
+            <div class="conv-row-bottom">
+              <span class="conv-row-preview">${escapeHtml(preview)}</span>
+              ${c.unread > 0 ? `<span class="unread-dot">${c.unread}</span>` : ''}
+            </div>
+          </div>
+        </div>
+      `;
+    };
+
+    if (isSearching) {
+      const shownContactIds = new Set(list.map((c) => c.contact?.id).filter(Boolean));
+      const agendaContacts = (state.contactSearchResults || []).filter(
+        (ct) => !shownContactIds.has(ct.id)
+      );
+
+      const convSectionHtml = `
+        <div class="conv-section-header">
+          <span>Conversas</span>
+          <span class="conv-section-count">${list.length}</span>
+        </div>
+        ${
+          list.length > 0
+            ? list.map(renderConvCard).join('')
+            : `<div class="conv-section-empty">Nenhuma conversa aberta corresponde à busca.</div>`
+        }
+      `;
+
+      const agendaSectionHtml = `
+        <div class="conv-section-header">
+          <span>Contatos da Agenda</span>
+          <span class="conv-section-count">${state.contactSearchLoading ? '...' : agendaContacts.length}</span>
+        </div>
+        ${
+          state.contactSearchLoading && agendaContacts.length === 0
+            ? `<div class="conv-section-empty">Buscando na agenda...</div>`
+            : agendaContacts.length > 0
+              ? agendaContacts
+                  .map(
+                    (ct) => `
+                      <div class="conv-row agenda-row" data-agenda-contact-id="${escapeHtml(ct.id)}">
+                        <div class="avatar md">
+                          ${renderAvatarInner(ct)}
+                          <span class="ch-dot wa" title="WhatsApp">W</span>
+                        </div>
+                        <div class="conv-row-body">
+                          <div class="conv-row-top">
+                            <span class="conv-row-name">${escapeHtml(ct.name)}</span>
+                            <span class="agenda-action-chip">Conversar</span>
+                          </div>
+                          <div class="conv-row-bottom">
+                            <span class="conv-row-preview">${escapeHtml(ct.phone || 'WhatsApp')}${ct.connection && ct.connection !== '-' ? ' • ' + escapeHtml(ct.connection) : ''}</span>
+                          </div>
+                        </div>
+                      </div>
+                    `
+                  )
+                  .join('')
+              : `<div class="conv-section-empty">Nenhum outro contato encontrado na agenda.</div>`
+        }
+      `;
+
+      listEl.innerHTML = convSectionHtml + agendaSectionHtml;
+    } else if (list.length === 0) {
       listEl.innerHTML = `<div style="padding:36px 14px;text-align:center;color:var(--text-muted);font-size:12.5px;">Nenhuma conversa nesta aba.</div>`;
     } else {
-      listEl.innerHTML = list
-        .map((c) => {
-          const last = [...c.messages].reverse().find((m) => m.type !== 'activity') || c.messages[c.messages.length - 1];
-          const prefix = last?.type === 'outgoing' ? '✓✓ ' : last?.type === 'private' ? '🔒 ' : '';
-          const attLabel = last?.attachment
-            ? {
-                document: `📄 ${last.attachment.name || 'Documento'}`,
-                image: '🖼️ Foto',
-                audio: `🎧 ${last.attachment.name || 'Áudio'}`,
-                contact: `👤 ${last.attachment.contactName || 'Contato'}`,
-                poll: `📊 Enquete: ${last.attachment.question || ''}`,
-                pix: `💠 Pix ${last.attachment.amount || ''}`,
-                event: `📅 ${last.attachment.title || 'Evento'}`,
-                sticker: 'Figurinha',
-              }[last.attachment.kind] || '📎 Anexo'
-            : '';
-          const preview = last ? `${prefix}${last.text || attLabel}` : '';
-          return `
-            <div class="conv-row ${c.id === state.selectedConvId ? 'active' : ''}" data-conv-id="${c.id}">
-              <div class="avatar md">
-                <span>${escapeHtml(c.contact.initials)}</span>
-                <span class="ch-dot ${channelBadgeClass(c.channel)}" title="${escapeHtml(c.channel)}">${channelMiniGlyph(c.channel)}</span>
-              </div>
-              <div class="conv-row-body">
-                <div class="conv-row-top">
-                  <span class="conv-row-name">${escapeHtml(c.contact.name)}</span>
-                  <span class="conv-row-time">${escapeHtml(c.updatedAt)}</span>
-                </div>
-                <div class="conv-ticket-tag">${escapeHtml(c.ticketNumber || '')}</div>
-                <div class="conv-row-bottom">
-                  <span class="conv-row-preview">${escapeHtml(preview)}</span>
-                  ${c.unread > 0 ? `<span class="unread-dot">${c.unread}</span>` : ''}
-                </div>
-              </div>
-            </div>
-          `;
-        })
-        .join('');
-
-      $$('.conv-row').forEach((row) => {
-        row.addEventListener('click', () => {
-          const rawId = row.dataset.convId;
-          const matched = state.conversations.find((c) => String(c.id) === String(rawId));
-          state.selectedConvId = matched ? matched.id : Number(rawId);
-          const selected = getSelectedConv();
-          if (selected) {
-            selected.unread = 0;
-            if (state.apiConnected && selected.isRemote) {
-              void API.markConversationRead(selected.id).catch(() => {});
-              void loadMessagesForConversation(selected.id);
-            }
-          }
-          renderConversations();
-        });
-      });
+      listEl.innerHTML = list.map(renderConvCard).join('');
     }
+
+    $$('.conv-row[data-conv-id]').forEach((row) => {
+      row.addEventListener('click', () => {
+        const rawId = row.dataset.convId;
+        const matched = state.conversations.find((c) => String(c.id) === String(rawId));
+        state.selectedConvId = matched ? matched.id : Number(rawId);
+        const selected = getSelectedConv();
+        const hadUnread = Boolean(selected && selected.unread > 0);
+        if (selected) {
+          selected.unread = 0;
+        }
+
+        // UI otimista: renderiza imediatamente o que já está em memória (<16ms)
+        renderConversations();
+
+        // Sincronização silenciosa em segundo plano sem travar a troca de chat
+        if (selected && state.apiConnected && selected.isRemote) {
+          if (hadUnread) {
+            void API.markConversationRead(selected.id).catch(() => {});
+          }
+          const isStale = Date.now() - (selected._messagesFetchedAt || 0) > 15000;
+          if (!selected._messagesLoaded || !state.socketConnected || isStale) {
+            void loadMessagesForConversation(selected.id, {
+              silent: Boolean(selected._messagesLoaded),
+            });
+          }
+        }
+      });
+    });
+
+    $$('.agenda-row[data-agenda-contact-id]').forEach((row) => {
+      row.addEventListener('click', () => {
+        const contactId = row.dataset.agendaContactId;
+        const contact = state.contactSearchResults.find((x) => String(x.id) === String(contactId));
+        if (contact) void openConversationForContact(contact);
+      });
+    });
 
     renderActiveChat();
   }
@@ -939,7 +1454,7 @@
     }
 
     $('#chatAvatar').innerHTML = `
-      <span>${escapeHtml(conv.contact.initials)}</span>
+      ${renderAvatarInner(conv.contact)}
       <span class="ch-dot ${channelBadgeClass(conv.channel)}">${channelMiniGlyph(conv.channel)}</span>
     `;
     $('#chatCustomerName').textContent = conv.contact.name;
@@ -1022,8 +1537,8 @@
               <div class="msg-attach-card">
                 <div class="msg-attach-title">📊 ${escapeHtml(att.question)}</div>
                 ${(att.options || [])
-                  .map((opt) => `<div class="msg-poll-opt"><span>○ ${escapeHtml(opt)}</span><span>0%</span></div>`)
-                  .join('')}
+                .map((opt) => `<div class="msg-poll-opt"><span>○ ${escapeHtml(opt)}</span><span>0%</span></div>`)
+                .join('')}
               </div>
             `;
           } else if (att.kind === 'pix') {
@@ -1044,19 +1559,7 @@
           }
         }
 
-        return `
-          <div class="msg-wrap ${m.type}">
-            <div class="bubble">
-              <div class="bubble-head">
-                <span class="bubble-sender">${isPriv ? '🔒 ' : ''}${escapeHtml(m.sender)}</span>
-                <span class="bubble-time">${escapeHtml(m.time)}${isOut ? ' ✓✓' : ''}</span>
-              </div>
-              ${quoteHtml}
-              ${m.text ? `<div>${escapeHtml(m.text)}</div>` : ''}
-              ${attachHtml}
-            </div>
-          </div>
-        `;
+        return `<div class="msg-wrap ${m.type}"><div class="bubble"><div class="bubble-head"><span class="bubble-sender">${isPriv ? '🔒 ' : ''}${escapeHtml(m.sender)}</span><span class="bubble-time">${escapeHtml(m.time)}${isOut ? ' ✓✓' : ''}</span></div>${quoteHtml}${m.text ? `<div class="bubble-text">${escapeHtml(m.text)}</div>` : ''}${attachHtml}</div></div>`;
       })
       .join('');
 
@@ -1067,7 +1570,7 @@
   function renderDrawer(conv) {
     $('#contactProfileBox').innerHTML = `
       <div class="contact-top">
-        <div class="avatar lg yellow-avatar">${escapeHtml(conv.contact.initials)}</div>
+        <div class="avatar lg yellow-avatar">${renderAvatarInner(conv.contact)}</div>
         <div>
           <div class="contact-name">${escapeHtml(conv.contact.name)}</div>
           <div class="contact-sub">${escapeHtml(conv.contact.role)}</div>
@@ -1452,6 +1955,15 @@
 
                     <div class="conn-menu-divider"></div>
 
+                    ${
+                      c.channel === 'WhatsApp'
+                        ? `<button type="button" class="conn-menu-item" data-conn-action="sync-contacts" data-conn-id="${c.id}">
+                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 11a4 4 0 0 0-6-3.46"/><path d="M16 14.46A4 4 0 0 0 22 11"/></svg>
+                             <span>Sincronizar Contatos</span>
+                           </button>`
+                        : ''
+                    }
+
                     <button type="button" class="conn-menu-item" data-conn-action="restart" data-conn-id="${c.id}">
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>
                       <span>Reiniciar</span>
@@ -1491,11 +2003,18 @@
                   <span class="status-pill ${statusMeta.cls}">
                     <i></i> ${statusMeta.label}
                   </span>
-                  ${
-                    c.channel === 'WhatsApp' && c.status === 'active' && c.sessionState !== 'connected'
-                      ? `<button class="conn-action-link" data-wa-qr-conn="${escapeHtml(c.id)}">Conectar QR Code →</button>`
-                      : `<button class="conn-action-link" data-filter-conn="${escapeHtml(c.name)}">Ver fila →</button>`
-                  }
+                  <div class="conn-actions-inline">
+                    ${
+                      c.channel === 'WhatsApp' && c.status === 'active' && c.sessionState === 'connected'
+                        ? `<button class="conn-action-link" data-sync-contacts-conn="${escapeHtml(c.id)}">Sincronizar Contatos</button>`
+                        : ''
+                    }
+                    ${
+                      c.channel === 'WhatsApp' && c.status === 'active' && c.sessionState !== 'connected'
+                        ? `<button class="conn-action-link" data-wa-qr-conn="${escapeHtml(c.id)}">Conectar QR Code →</button>`
+                        : `<button class="conn-action-link" data-filter-conn="${escapeHtml(c.name)}">Ver fila →</button>`
+                    }
+                  </div>
                 </div>
               </div>
             </div>
@@ -1527,6 +2046,13 @@
           e.stopPropagation();
           const target = state.connections.find((x) => x.id === btn.dataset.waQrConn);
           if (target) void openWhatsAppQrModal(target);
+        };
+      });
+
+      $$('[data-sync-contacts-conn]').forEach((btn) => {
+        btn.onclick = (e) => {
+          e.stopPropagation();
+          void syncWhatsAppContacts(btn.dataset.syncContactsConn);
         };
       });
 
@@ -1629,8 +2155,8 @@
       events.length === 0
         ? `<div class="empty-hint">Nenhum evento registrado para esta conexão.</div>`
         : events
-            .map(
-              (ev) => `
+          .map(
+            (ev) => `
                 <div class="conn-event-row">
                   <span class="conn-event-dot ${escapeHtml(ev.tone || 'info')}"></span>
                   <div class="conn-event-content">
@@ -1639,8 +2165,8 @@
                   </div>
                 </div>
               `
-            )
-            .join('');
+          )
+          .join('');
     $('#eventsConnModal').classList.remove('hidden');
   }
 
@@ -1675,7 +2201,7 @@
     if (action === 'archive') {
       const nextAction = conn.status === 'active' ? 'archive' : 'activate';
       if (state.apiConnected && conn.isRemote) {
-        void API.updateConnectionStatus(conn.id, nextAction).catch(() => {});
+        void API.updateConnectionStatus(conn.id, nextAction).catch(() => { });
       }
       conn.status = conn.status === 'active' ? 'archived' : 'active';
       if (conn.status === 'active' && conn.sessionState === 'disconnected') {
@@ -1688,6 +2214,12 @@
       );
       renderConnections();
       toast(conn.status === 'archived' ? `Conexão "${conn.name}" arquivada` : `Conexão "${conn.name}" reativada!`);
+      return;
+    }
+
+    if (action === 'sync-contacts') {
+      renderConnections();
+      void syncWhatsAppContacts(conn.id);
       return;
     }
 
@@ -1714,12 +2246,12 @@
 
     if (action === 'pause') {
       if (conn.sessionState === 'paused') {
-        if (state.apiConnected && conn.isRemote) void API.updateConnectionStatus(conn.id, 'resume').catch(() => {});
+        if (state.apiConnected && conn.isRemote) void API.updateConnectionStatus(conn.id, 'resume').catch(() => { });
         conn.sessionState = 'connected';
         pushConnectionEvent(conn, 'Atendimentos da conexão retomados', 'success');
         toast(`Conexão "${conn.name}" retomada!`);
       } else {
-        if (state.apiConnected && conn.isRemote) void API.updateConnectionStatus(conn.id, 'pause').catch(() => {});
+        if (state.apiConnected && conn.isRemote) void API.updateConnectionStatus(conn.id, 'pause').catch(() => { });
         conn.sessionState = 'paused';
         pushConnectionEvent(conn, 'Conexão pausada temporariamente', 'warning');
         pushNotification({
@@ -1744,7 +2276,7 @@
         pushConnectionEvent(conn, 'Sessão reconectada manualmente', 'success');
         toast(`Conexão "${conn.name}" reconectada!`);
       } else {
-        if (state.apiConnected && conn.isRemote) void API.updateConnectionStatus(conn.id, 'disconnect').catch(() => {});
+        if (state.apiConnected && conn.isRemote) void API.updateConnectionStatus(conn.id, 'disconnect').catch(() => { });
         conn.sessionState = 'disconnected';
         pushConnectionEvent(conn, 'Sessão desconectada manualmente', 'danger');
         pushNotification({
@@ -1770,17 +2302,41 @@
   // ========================================================================
   function getFilteredContacts() {
     const q = ($('#contactsSearchInput').value || '').trim().toLowerCase();
-    return state.conversations.filter((c) => {
-      if (state.contactsConnFilter !== 'all' && c.connection !== state.contactsConnFilter) return false;
-      if (state.contactsDeptFilter !== 'all' && c.department !== state.contactsDeptFilter) return false;
-      if (state.contactsLabelFilter !== 'all' && !(c.labels || []).includes(state.contactsLabelFilter)) return false;
+    const qDigits = q.replace(/\D/g, '');
+    const source =
+      state.apiConnected && state.contacts.length > 0
+        ? state.contacts.map((ct) => ({
+            id: ct.id,
+            conversationId: ct.conversationId,
+            connection: ct.connection || '-',
+            connectionId: ct.connectionId || null,
+            department: ct.department || 'Suporte',
+            labels: [],
+            contact: ct,
+          }))
+        : state.conversations.map((c) => ({
+            id: c.contact.id || String(c.id),
+            conversationId: c.id,
+            connection: c.connection,
+            connectionId: c.connectionId || null,
+            department: c.department,
+            labels: c.labels || [],
+            contact: c.contact,
+          }));
+
+    return source.filter((item) => {
+      if (state.contactsConnFilter !== 'all' && item.connection !== state.contactsConnFilter) return false;
+      if (state.contactsDeptFilter !== 'all' && item.department !== state.contactsDeptFilter) return false;
+      if (state.contactsLabelFilter !== 'all' && !(item.labels || []).includes(state.contactsLabelFilter)) return false;
       if (q) {
+        const phoneDigits = (item.contact.phone || '').replace(/\D/g, '');
         const match =
-          c.contact.name.toLowerCase().includes(q) ||
-          (c.contact.role || '').toLowerCase().includes(q) ||
-          (c.contact.phone || '').toLowerCase().includes(q) ||
-          (c.contact.email || '').toLowerCase().includes(q) ||
-          (c.connection || '').toLowerCase().includes(q);
+          (item.contact.name || '').toLowerCase().includes(q) ||
+          (item.contact.role || '').toLowerCase().includes(q) ||
+          (item.contact.phone || '').toLowerCase().includes(q) ||
+          (qDigits.length >= 2 && phoneDigits.includes(qDigits)) ||
+          (item.contact.email || '').toLowerCase().includes(q) ||
+          (item.connection || '').toLowerCase().includes(q);
         if (!match) return false;
       }
       return true;
@@ -1788,6 +2344,7 @@
   }
 
   function renderContacts() {
+    updateContactsCountBadge();
     const connSelect = $('#contactsConnFilter');
     const uniqueConns = [...new Set(state.connections.map((c) => c.name))];
     connSelect.innerHTML = [
@@ -1825,33 +2382,39 @@
           <tr>
             <td>
               <div style="display:flex;align-items:center;gap:10px;">
-                <div class="avatar xs yellow-avatar">${escapeHtml(c.contact.initials)}</div>
+                <div class="avatar xs yellow-avatar">${renderAvatarInner(c.contact)}</div>
                 <div>
                   <div style="font-weight:600;">${escapeHtml(c.contact.name)}</div>
-                  <div style="font-size:11.5px;color:var(--text-muted);">${escapeHtml(c.contact.role)}</div>
+                  <div style="font-size:11.5px;color:var(--text-muted);">${escapeHtml(c.contact.role || 'WhatsApp')}</div>
                 </div>
               </div>
             </td>
             <td>
-              <div>${escapeHtml(c.contact.phone)}</div>
-              <div style="font-size:11.5px;color:var(--text-muted);">${escapeHtml(c.contact.email)}</div>
+              <div>${escapeHtml(c.contact.phone || 'WhatsApp')}</div>
+              <div style="font-size:11.5px;color:var(--text-muted);">${escapeHtml(c.contact.email || '-')}</div>
             </td>
             <td><span class="header-pill connection">${escapeHtml(c.connection)}</span></td>
             <td>${escapeHtml(c.department)}</td>
             <td style="text-align:right;">
-              <button class="btn secondary pill" style="padding:6px 13px;font-size:12px;" data-open-conv="${c.id}">Abrir chat</button>
+              <button class="btn secondary pill" style="padding:6px 13px;font-size:12px;" data-open-contact-chat="${escapeHtml(c.id)}">Abrir chat</button>
             </td>
           </tr>
         `
       )
       .join('');
 
-    $$('[data-open-conv]').forEach((btn) => {
+    $$('[data-open-contact-chat]').forEach((btn) => {
       btn.onclick = () => {
-        state.selectedConvId = Number(btn.dataset.openConv);
-        state.tab = 'all';
-        state.statusFilter = 'all';
-        setView('conversations');
+        const targetId = btn.dataset.openContactChat;
+        const item = list.find((x) => String(x.id) === String(targetId));
+        if (item) {
+          void openConversationForContact({
+            ...item.contact,
+            id: item.id,
+            connectionId: item.connectionId,
+            conversationId: item.conversationId,
+          });
+        }
       };
     });
   }
@@ -2019,7 +2582,7 @@
     $('#btnCopySubdomain').addEventListener('click', () => {
       const sub = state.currentUser.subdomain || 'supermegavendas';
       if (navigator.clipboard?.writeText) {
-        navigator.clipboard.writeText(`${sub}.smvsac.com.br`).catch(() => {});
+        navigator.clipboard.writeText(`${sub}.smvsac.com.br`).catch(() => { });
       }
       toast(`Subdomínio copiado: ${sub}`);
     });
@@ -2095,6 +2658,20 @@
     $('#convSearchInput').addEventListener('input', (e) => {
       state.searchQuery = e.target.value;
       renderConversations();
+
+      if (state.convSearchDebounceTimer) {
+        clearTimeout(state.convSearchDebounceTimer);
+      }
+      const q = state.searchQuery.trim();
+      if (!q) {
+        state.contactSearchResults = [];
+        state.contactSearchLoading = false;
+        renderConversations();
+        return;
+      }
+      state.convSearchDebounceTimer = setTimeout(() => {
+        void searchAgendaContactsForSidebar(q);
+      }, 150);
     });
 
     // Recolher / expandir lista de conversas
@@ -2150,6 +2727,35 @@
       }
     });
 
+    const btnActionNewConv = $('#btnActionNewConversation');
+    if (btnActionNewConv) {
+      btnActionNewConv.addEventListener('click', (e) => {
+        e.stopPropagation();
+        closeConvMenus();
+        openNewConversationModal();
+      });
+    }
+
+    const newConvModal = $('#newConversationModal');
+    if (newConvModal) {
+      $('#btnCloseNewConv')?.addEventListener('click', closeNewConversationModal);
+      $('#btnCancelNewConv')?.addEventListener('click', closeNewConversationModal);
+      newConvModal.addEventListener('click', (e) => {
+        if (e.target === newConvModal) closeNewConversationModal();
+      });
+      $('#btnNewConvGoRegister')?.addEventListener('click', () => {
+        closeNewConversationModal();
+        $('#btnActionAddContact').click();
+      });
+      $('#newConvSearchInput')?.addEventListener('input', (e) => {
+        const val = e.target.value;
+        if (state.newConvDebounceTimer) clearTimeout(state.newConvDebounceTimer);
+        state.newConvDebounceTimer = setTimeout(() => {
+          void searchContactsForNewConvModal(val);
+        }, 150);
+      });
+    }
+
     $('#btnActionAddContact').addEventListener('click', (e) => {
       e.stopPropagation();
       closeConvMenus();
@@ -2204,7 +2810,7 @@
     $('#addContactConvModal').addEventListener('click', (e) => {
       if (e.target === $('#addContactConvModal')) closeAddContactConvModal();
     });
-    $('#btnSaveAddContactConv').addEventListener('click', () => {
+    $('#btnSaveAddContactConv').addEventListener('click', async () => {
       const name = $('#newContactConvName').value.trim();
       const phone = $('#newContactConvPhone').value.trim();
       if (!name) {
@@ -2216,11 +2822,55 @@
       const channel = connSelect.selectedOptions?.[0]?.dataset?.channel || 'WhatsApp';
       const dept = $('#newContactConvDept').value || 'Suporte';
       const email = $('#newContactConvEmail').value.trim() || '-';
-      const firstMsg = $('#newContactConvMsg').value.trim() || 'Olá! Iniciando atendimento por aqui.';
+      const firstMsg = $('#newContactConvMsg').value.trim();
 
+      // Se o back-end real estiver conectado, persiste o contato e inicia a conversa no Supabase
+      if (state.apiConnected && API) {
+        try {
+          const matchedConn = state.connections.find((c) => c.name === connName);
+          const matchedDept = (state.backendDepartments || []).find((d) => d.name === dept);
+          const created = await API.createContact({
+            name,
+            phone: phone || undefined,
+            email: email !== '-' ? email : '',
+            connectionId: matchedConn?.id,
+            departmentId: matchedDept?.id,
+            startConversation: true,
+          });
+          closeAddContactConvModal();
+          void loadBackendContacts('', 200);
+          if (created?.conversation) {
+            const mapped = mapBackendConversation(created.conversation);
+            state.conversations.unshift(mapped);
+            if (state.contactModalSource === 'contacts') {
+              renderContacts();
+              updateGlobalCounts();
+              toast(`Contato "${name}" cadastrado com sucesso!`);
+            } else {
+              state.tab = 'all';
+              state.statusFilter = 'open';
+              state.selectedConvId = mapped.id;
+              setView('conversations');
+              if (firstMsg) {
+                $('#composerInput').value = firstMsg;
+              }
+              setTimeout(() => $('#composerInput')?.focus(), 35);
+              toast(`Contato "${name}" adicionado e conversa iniciada (${mapped.ticketNumber})!`);
+            }
+          } else {
+            toast(`Contato "${name}" cadastrado com sucesso!`);
+          }
+          return;
+        } catch (err) {
+          toast(`Erro ao salvar contato: ${err.message}`);
+          return;
+        }
+      }
+
+      const fallbackMsg = firstMsg || 'Olá! Iniciando atendimento por aqui.';
       const parts = name.split(/\s+/);
       const initials = ((parts[0]?.[0] || 'C') + (parts[1]?.[0] || parts[0]?.[1] || 'T')).toUpperCase();
-      const id = 600 + Date.now() % 100000;
+      const id = 600 + (Date.now() % 100000);
       const now = Date.now();
 
       state.conversations.unshift({
@@ -2252,7 +2902,7 @@
             id: 'c_' + now,
             type: 'outgoing',
             sender: DATA.currentAgent.name,
-            text: firstMsg,
+            text: fallbackMsg,
             time: nowTime(),
           },
         ],
@@ -2268,6 +2918,7 @@
         toast(`Contato "${name}" cadastrado com sucesso!`);
       } else {
         renderConversations();
+        setTimeout(() => $('#composerInput')?.focus(), 35);
         toast(`Contato "${name}" adicionado e conversa iniciada!`);
       }
     });
@@ -2381,7 +3032,7 @@
             }
           });
         }
-      } catch {}
+      } catch { }
       return list;
     };
 
@@ -2505,7 +3156,7 @@
       const nextStatus = conv.status === 'resolved' ? 'open' : 'resolved';
       conv.status = nextStatus;
       if (state.apiConnected && conv.isRemote && API) {
-        API.updateConversationStatus(conv.id, nextStatus === 'resolved' ? 'RESOLVED' : 'OPEN').catch(() => {});
+        API.updateConversationStatus(conv.id, nextStatus === 'resolved' ? 'RESOLVED' : 'OPEN').catch(() => { });
       }
       conv.messages.push({
         id: 'act_' + Date.now(),
@@ -2622,7 +3273,7 @@
           input.focus();
           try {
             input.setSelectionRange(nextPos, nextPos);
-          } catch {}
+          } catch { }
         };
       });
     };
@@ -3326,17 +3977,33 @@
       }
     });
 
-    $('#btnContactsRefresh').addEventListener('click', () => {
+    $('#btnContactsSyncWa')?.addEventListener('click', () => {
+      void syncWhatsAppContacts();
+    });
+
+    $('#btnContactsRefresh').addEventListener('click', async () => {
       const btn = $('#btnContactsRefresh');
       btn.classList.remove('spinning');
       void btn.offsetWidth;
       btn.classList.add('spinning');
-      renderContacts();
+      if (state.apiConnected) {
+        await loadBackendContacts($('#contactsSearchInput').value || '', 200);
+      } else {
+        renderContacts();
+      }
       toast('Lista de contatos atualizada!');
       setTimeout(() => btn.classList.remove('spinning'), 600);
     });
 
-    $('#contactsSearchInput').addEventListener('input', renderContacts);
+    $('#contactsSearchInput').addEventListener('input', () => {
+      renderContacts();
+      if (state.apiConnected) {
+        if (state.contactsTabDebounceTimer) clearTimeout(state.contactsTabDebounceTimer);
+        state.contactsTabDebounceTimer = setTimeout(() => {
+          void loadBackendContacts($('#contactsSearchInput').value || '', 200);
+        }, 150);
+      }
+    });
     $('#contactsConnFilter').addEventListener('change', (e) => {
       state.contactsConnFilter = e.target.value;
       renderContacts();
@@ -3498,6 +4165,53 @@
       inp.type = inp.type === 'password' ? 'text' : 'password';
     });
 
+    const btnToggleRegPwd = $('#btnToggleRegPwd');
+    if (btnToggleRegPwd) {
+      btnToggleRegPwd.addEventListener('click', () => {
+        const inp = $('#regPassword');
+        inp.type = inp.type === 'password' ? 'text' : 'password';
+      });
+    }
+
+    function evaluatePasswordStrength(pwd) {
+      const checks = {
+        length: pwd.length >= 8,
+        upper: /[A-Z]/.test(pwd),
+        lower: /[a-z]/.test(pwd),
+        number: /[0-9]/.test(pwd),
+        special: /[^A-Za-z0-9\s]/.test(pwd),
+      };
+      const valid = Object.values(checks).every(Boolean);
+      return { checks, valid };
+    }
+
+    function updateRegPasswordRulesUI(pwd, showInvalidState = false) {
+      const { checks } = evaluatePasswordStrength(pwd);
+      const hasInput = pwd.length > 0;
+      $$('#regPasswordRules .pwd-rule').forEach((item) => {
+        const rule = item.dataset.rule;
+        const ok = Boolean(checks[rule]);
+        item.classList.toggle('valid', ok);
+        item.classList.toggle('invalid', !ok && (showInvalidState || hasInput));
+        const icon = item.querySelector('.pwd-rule-icon');
+        if (icon) {
+          icon.textContent = ok ? '✓' : showInvalidState || hasInput ? '✕' : '•';
+        }
+      });
+    }
+
+    const regPasswordInput = $('#regPassword');
+    if (regPasswordInput) {
+      regPasswordInput.addEventListener('input', () => {
+        updateRegPasswordRulesUI(regPasswordInput.value, false);
+        const err = $('#registerError');
+        if (!err.classList.contains('hidden')) {
+          const { valid } = evaluatePasswordStrength(regPasswordInput.value);
+          if (valid) err.classList.add('hidden');
+        }
+      });
+    }
+
     const ADMIN_ACCOUNT = {
       name: 'Ransay',
       email: 'ransay@supermegavendas.com',
@@ -3598,7 +4312,7 @@
       toast(`Link de recuperação enviado para ${email}`);
     });
 
-    $('#registerForm').addEventListener('submit', (e) => {
+    $('#registerForm').addEventListener('submit', async (e) => {
       e.preventDefault();
       const name = $('#regName').value.trim();
       const email = $('#regEmail').value.trim().toLowerCase();
@@ -3615,11 +4329,43 @@
         err.classList.remove('hidden');
         return;
       }
-      if (!pwd || pwd.length < 4) {
-        err.textContent = 'Crie uma senha com pelo menos 4 caracteres.';
+      const pwdEval = evaluatePasswordStrength(pwd);
+      if (!pwdEval.valid) {
+        updateRegPasswordRulesUI(pwd, true);
+        err.textContent =
+          'A senha deve ter no mínimo 8 caracteres, contendo letra maiúscula, letra minúscula, número e caractere especial.';
         err.classList.remove('hidden');
         return;
       }
+
+      // 1. Tenta cadastrar no back-end real (Fastify + Supabase na porta 3333)
+      if (API) {
+        try {
+          const res = await API.register(name, email, pwd);
+          state.apiConnected = true;
+          state.lgpdAccepted = Boolean(res.lgpd?.accepted);
+          DATA.currentAgent.id = res.user.id;
+          err.classList.add('hidden');
+          startAuthFlow({
+            id: res.user.id,
+            name: res.user.name,
+            email: res.user.email,
+            role: res.user.role === 'ADMIN' ? 'Admin' : 'Agente',
+            subdomain: res.user.organization?.slug || 'supermegavendas',
+            isNew: true,
+          });
+          return;
+        } catch (apiErr) {
+          if (apiErr.status === 400 || apiErr.status === 404 || apiErr.status === 409) {
+            err.textContent = apiErr.message || 'Não foi possível concluir o cadastro.';
+            err.classList.remove('hidden');
+            return;
+          }
+          // Se o back-end estiver offline (erro de rede), segue com fallback local
+          state.apiConnected = false;
+        }
+      }
+
       if (getRegisteredUsers().some((u) => u.email.toLowerCase() === email)) {
         err.textContent = 'Este e-mail já está cadastrado. Faça login para acessar.';
         err.classList.remove('hidden');
@@ -3654,7 +4400,7 @@
         })
       );
       if (state.apiConnected && API) {
-        await API.recordLgpdConsent(acceptedMarketing).catch(() => {});
+        await API.recordLgpdConsent(acceptedMarketing).catch(() => { });
       }
       closeLgpdModal();
       if (state.pendingUser) {
@@ -3682,8 +4428,10 @@
         await API.logout();
       }
       stopWaQrPolling();
+      stopFallbackSyncPolling();
       state.authenticated = false;
       state.apiConnected = false;
+      state.socketConnected = false;
       state.lgpdAccepted = false;
       $('#appShell').classList.add('hidden');
       $('#authScreen').classList.remove('hidden');
@@ -3703,6 +4451,7 @@
         closeDeleteConnModal();
         closeUpgradeConnModal();
         closeAddContactConvModal();
+        closeNewConversationModal();
         closeAddGroupConvModal();
         closeImportContactsModal();
         closeManualModal();
