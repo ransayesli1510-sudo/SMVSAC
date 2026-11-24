@@ -6,7 +6,6 @@ import {
   DisconnectReason,
   fetchLatestBaileysVersion,
   makeWASocket,
-  useMultiFileAuthState,
   type Contact as WaContact,
   type WASocket,
 } from '@whiskeysockets/baileys';
@@ -14,9 +13,14 @@ import QRCode from 'qrcode';
 import pino from 'pino';
 import { ChannelType, ConnectionProvider, ConnectionStatus } from '@prisma/client';
 
+import { env } from '../../config/env.js';
 import { prisma } from '../../shared/database/prisma.js';
 import { formatPhoneFromJid, isGroupJid, isLidJid } from '../../shared/formatters/ticket.js';
 import { emitToOrganization } from '../../realtime/socket.js';
+import {
+  useDatabaseAuthState,
+  type ManagedBaileysAuthState,
+} from './whatsapp.auth-state.js';
 import {
   enqueueMissingAvatarsForOrganization,
   handleWhatsAppStatusUpdates,
@@ -45,6 +49,7 @@ interface SessionEntry {
   lidToPn: Map<string, string>;
   knownNames: Map<string, string>;
   knownContacts: Map<string, Partial<WaContact>>;
+  authState: ManagedBaileysAuthState | null;
 }
 
 const SESSIONS_ROOT = path.resolve(process.cwd(), '.baileys_sessions');
@@ -136,9 +141,12 @@ class WhatsAppSessionManager {
     }
 
     const sessionDir = this.getSessionDir(connectionId);
-    await fs.mkdir(sessionDir, { recursive: true });
-
-    const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+    const authState = await useDatabaseAuthState({
+      connectionId,
+      organizationId,
+      legacySessionDir: sessionDir,
+    });
+    const { state, saveCreds } = authState;
 
     let version: [number, number, number] = [2, 3000, 1023223821];
     try {
@@ -161,6 +169,7 @@ class WhatsAppSessionManager {
       lidToPn: existing?.lidToPn ?? new Map<string, string>(),
       knownNames: existing?.knownNames ?? new Map<string, string>(),
       knownContacts: existing?.knownContacts ?? new Map<string, Partial<WaContact>>(),
+      authState,
     };
     this.sessions.set(connectionId, entry);
 
@@ -260,10 +269,11 @@ class WhatsAppSessionManager {
         if (isLoggedOut) {
           entry.status = 'DISCONNECTED';
           entry.socket = null;
-          await fs.rm(sessionDir, { recursive: true, force: true }).catch(() => { });
+          await entry.authState?.clearState().catch(() => {});
+          await fs.rm(sessionDir, { recursive: true, force: true }).catch(() => {});
           await prisma.connection.updateMany({
             where: { id: connectionId, organizationId },
-            data: { status: ConnectionStatus.DISCONNECTED },
+            data: { status: ConnectionStatus.DISCONNECTED, credentialsEncrypted: null },
           });
           emitToOrganization(organizationId, 'whatsapp:status', {
             connectionId,
@@ -556,12 +566,16 @@ class WhatsAppSessionManager {
     }
 
     if (clearAuth) {
-      await fs.rm(this.getSessionDir(connectionId), { recursive: true, force: true }).catch(() => { });
+      await entry?.authState?.clearState().catch(() => {});
+      await fs.rm(this.getSessionDir(connectionId), { recursive: true, force: true }).catch(() => {});
     }
 
     await prisma.connection.updateMany({
       where: { id: connectionId, organizationId },
-      data: { status: ConnectionStatus.DISCONNECTED },
+      data: {
+        status: ConnectionStatus.DISCONNECTED,
+        ...(clearAuth ? { credentialsEncrypted: null } : {}),
+      },
     });
 
     emitToOrganization(organizationId, 'whatsapp:status', {
@@ -620,7 +634,8 @@ class WhatsAppSessionManager {
   }
 
   /**
-   * Reconecta automaticamente sessões Baileys ativas que já possuem credenciais salvas em disco.
+   * Reconecta automaticamente sessões Baileys ativas salvas no PostgreSQL (credentials_encrypted)
+   * ou no disco legado (.baileys_sessions), sobrevivendo a reinícios e redeploys na nuvem.
    */
   async restoreActiveSessions(): Promise<void> {
     try {
@@ -630,10 +645,15 @@ class WhatsAppSessionManager {
           provider: ConnectionProvider.BAILEYS,
           status: ConnectionStatus.ACTIVE,
         },
-        select: { id: true, organizationId: true },
+        select: { id: true, organizationId: true, credentialsEncrypted: true },
       });
 
       for (const conn of activeConns) {
+        if (env.BAILEYS_AUTH_STORAGE === 'database' && conn.credentialsEncrypted) {
+          void this.startSession(conn.id, conn.organizationId);
+          continue;
+        }
+
         const credsPath = path.join(this.getSessionDir(conn.id), 'creds.json');
         try {
           await fs.access(credsPath);

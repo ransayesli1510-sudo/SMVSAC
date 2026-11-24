@@ -26,6 +26,9 @@ const envSchema = z.object({
     .string()
     .regex(/^[0-9a-fA-F]{64}$/, 'CREDENTIALS_ENCRYPTION_KEY deve ser uma string hex de 64 caracteres (32 bytes)'),
 
+  // Persistência de sessão Baileys ('database' criptografada no PostgreSQL por padrão; 'file' opcional em disco)
+  BAILEYS_AUTH_STORAGE: z.enum(['database', 'file']).default('database'),
+
   // Opcionais no MVP
   REDIS_URL: z.string().optional().default(''),
   AI_PROVIDER: z.string().optional().default('openai'),
@@ -44,3 +47,13 @@ if (!parsed.success) {
 
 export const env = parsed.data;
 export type Env = typeof env;
+
+/**
+ * Normaliza múltiplas origens CORS separadas por vírgula (ex.: http://localhost:8080,https://meu-app.vercel.app)
+ * removendo barras finais para evitar mismatch de CORS no Fastify e Socket.IO.
+ */
+export function getCorsOrigins(): string[] {
+  return env.CORS_ORIGIN.split(',')
+    .map((o) => o.trim().replace(/\/+$/, ''))
+    .filter(Boolean);
+}

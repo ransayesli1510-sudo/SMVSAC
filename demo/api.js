@@ -3,11 +3,31 @@
    ========================================================================== */
 
 (function () {
-  const BASE_URL = window.SMV_API_BASE_URL || 'http://localhost:3333';
+  const rawBaseUrl =
+    (window.SMV_CONFIG && window.SMV_CONFIG.API_URL) ||
+    window.SMV_API_BASE_URL ||
+    'http://localhost:3333';
+  const BASE_URL = String(rawBaseUrl).replace(/\/+$/, '');
   const API_PREFIX = `${BASE_URL}/api/v1`;
 
   let accessToken = null;
+  let refreshToken = null;
   let socket = null;
+  let socketScriptPromise = null;
+
+  function ensureSocketIoClient() {
+    if (typeof window.io === 'function') return Promise.resolve(true);
+    if (socketScriptPromise) return socketScriptPromise;
+    socketScriptPromise = new Promise((resolve) => {
+      const script = document.createElement('script');
+      script.src = `${BASE_URL}/socket.io/socket.io.js`;
+      script.async = true;
+      script.onload = () => resolve(typeof window.io === 'function');
+      script.onerror = () => resolve(false);
+      document.head.appendChild(script);
+    });
+    return socketScriptPromise;
+  }
 
   async function rawFetch(path, options = {}, retried = false) {
     const headers = new Headers(options.headers || {});
@@ -18,11 +38,21 @@
       headers.set('Content-Type', 'application/json');
     }
 
-    const response = await fetch(`${API_PREFIX}${path}`, {
-      ...options,
-      headers,
-      credentials: 'include',
-    });
+    let response;
+    try {
+      response = await fetch(`${API_PREFIX}${path}`, {
+        ...options,
+        headers,
+        credentials: 'include',
+      });
+    } catch (networkErr) {
+      const err = new Error('Não foi possível conectar ao servidor back-end. Verifique se a API está online.');
+      err.status = 0;
+      err.code = 'NETWORK_ERROR';
+      err.isNetworkError = true;
+      err.cause = networkErr;
+      throw err;
+    }
 
     if (response.status === 401 && !retried && path !== '/auth/login' && path !== '/auth/refresh') {
       const refreshed = await refreshAccessToken();
@@ -38,13 +68,14 @@
       const firstFieldError =
         data?.details && typeof data.details === 'object'
           ? Object.values(data.details)
-              .flat()
-              .find((msg) => typeof msg === 'string' && msg.trim().length > 0)
+            .flat()
+            .find((msg) => typeof msg === 'string' && msg.trim().length > 0)
           : null;
       const err = new Error(firstFieldError || data?.message || `Erro HTTP ${response.status}`);
       err.status = response.status;
       err.code = data?.error || 'API_ERROR';
       err.details = data?.details;
+      err.isNetworkError = false;
       throw err;
     }
 
@@ -56,11 +87,14 @@
       const res = await fetch(`${API_PREFIX}/auth/refresh`, {
         method: 'POST',
         credentials: 'include',
+        headers: refreshToken ? { 'Content-Type': 'application/json' } : undefined,
+        body: refreshToken ? JSON.stringify({ refreshToken }) : undefined,
       });
       if (!res.ok) return false;
       const data = await res.json();
       if (data?.accessToken) {
         accessToken = data.accessToken;
+        if (data.refreshToken) refreshToken = data.refreshToken;
         return true;
       }
       return false;
@@ -72,12 +106,21 @@
   window.SMV_API = {
     BASE_URL,
 
-    setToken(token) {
+    setToken(token, nextRefreshToken) {
       accessToken = token || null;
+      if (nextRefreshToken !== undefined) {
+        refreshToken = nextRefreshToken || null;
+      } else if (!token) {
+        refreshToken = null;
+      }
     },
 
     getToken() {
       return accessToken;
+    },
+
+    getRefreshToken() {
+      return refreshToken;
     },
 
     async checkHealth() {
@@ -93,6 +136,7 @@
         body: JSON.stringify({ email, password }),
       });
       accessToken = data.accessToken;
+      refreshToken = data.refreshToken || null;
       return data;
     },
 
@@ -102,7 +146,12 @@
         body: JSON.stringify({ name, email, password }),
       });
       accessToken = data.accessToken;
+      refreshToken = data.refreshToken || null;
       return data;
+    },
+
+    async getMe() {
+      return rawFetch('/auth/me');
     },
 
     async logout() {
@@ -112,6 +161,7 @@
         // Ignora erro de rede ao encerrar
       }
       accessToken = null;
+      refreshToken = null;
       this.disconnectSocket();
     },
 
@@ -124,6 +174,31 @@
           acceptedMarketing: Boolean(acceptedMarketing),
           subjectType: 'USER',
         }),
+      });
+    },
+
+    // Gestão de Usuários (apenas Administrador)
+    getUsers() {
+      return rawFetch('/users');
+    },
+
+    createUser(payload) {
+      return rawFetch('/users', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+    },
+
+    updateUserRole(userId, role) {
+      return rawFetch(`/users/${userId}/role`, {
+        method: 'PATCH',
+        body: JSON.stringify({ role }),
+      });
+    },
+
+    deleteUser(userId) {
+      return rawFetch(`/users/${userId}`, {
+        method: 'DELETE',
       });
     },
 
@@ -255,68 +330,79 @@
       });
     },
 
-    // Socket.IO Realtime
+    // Socket.IO Realtime (carrega socket.io.js dinamicamente a partir de BASE_URL para funcionar no Vercel e localhost)
     connectSocket(handlers = {}) {
       this.disconnectSocket();
-      if (typeof window.io !== 'function' || !accessToken) {
-        return null;
+      if (!accessToken) return null;
+
+      const openNow = () => {
+        if (typeof window.io !== 'function' || !accessToken) return null;
+
+        socket = window.io(BASE_URL, {
+          auth: { token: accessToken },
+          transports: ['websocket', 'polling'],
+          reconnection: true,
+          reconnectionDelay: 2000,
+        });
+
+        socket.on('connect', () => {
+          if (handlers.onConnect) handlers.onConnect();
+        });
+
+        socket.on('disconnect', () => {
+          if (handlers.onDisconnect) handlers.onDisconnect();
+        });
+
+        socket.on('whatsapp:qr', (payload) => {
+          if (handlers.onWhatsAppQr) handlers.onWhatsAppQr(payload);
+        });
+
+        socket.on('whatsapp:status', (payload) => {
+          if (handlers.onWhatsAppStatus) handlers.onWhatsAppStatus(payload);
+        });
+
+        socket.on('whatsapp:history_synced', (payload) => {
+          if (handlers.onHistorySynced) handlers.onHistorySynced(payload);
+        });
+
+        socket.on('message:created', (payload) => {
+          if (handlers.onMessageCreated) handlers.onMessageCreated(payload);
+        });
+
+        socket.on('message:status', (payload) => {
+          if (handlers.onMessageStatus) handlers.onMessageStatus(payload);
+        });
+
+        socket.on('conversation:updated', (payload) => {
+          if (handlers.onConversationUpdated) handlers.onConversationUpdated(payload);
+        });
+
+        socket.on('contact:avatar_updated', (payload) => {
+          if (handlers.onContactAvatarUpdated) handlers.onContactAvatarUpdated(payload);
+        });
+
+        socket.on('whatsapp:contacts_synced', (payload) => {
+          if (handlers.onContactsSynced) handlers.onContactsSynced(payload);
+        });
+
+        return socket;
+      };
+
+      if (typeof window.io === 'function') {
+        return openNow();
       }
 
-      socket = window.io(BASE_URL, {
-        auth: { token: accessToken },
-        transports: ['websocket', 'polling'],
-        reconnection: true,
-        reconnectionDelay: 2000,
+      void ensureSocketIoClient().then((loaded) => {
+        if (loaded) openNow();
       });
-
-      socket.on('connect', () => {
-        if (handlers.onConnect) handlers.onConnect();
-      });
-
-      socket.on('disconnect', () => {
-        if (handlers.onDisconnect) handlers.onDisconnect();
-      });
-
-      socket.on('whatsapp:qr', (payload) => {
-        if (handlers.onWhatsAppQr) handlers.onWhatsAppQr(payload);
-      });
-
-      socket.on('whatsapp:status', (payload) => {
-        if (handlers.onWhatsAppStatus) handlers.onWhatsAppStatus(payload);
-      });
-
-      socket.on('whatsapp:history_synced', (payload) => {
-        if (handlers.onHistorySynced) handlers.onHistorySynced(payload);
-      });
-
-      socket.on('message:created', (payload) => {
-        if (handlers.onMessageCreated) handlers.onMessageCreated(payload);
-      });
-
-      socket.on('message:status', (payload) => {
-        if (handlers.onMessageStatus) handlers.onMessageStatus(payload);
-      });
-
-      socket.on('conversation:updated', (payload) => {
-        if (handlers.onConversationUpdated) handlers.onConversationUpdated(payload);
-      });
-
-      socket.on('contact:avatar_updated', (payload) => {
-        if (handlers.onContactAvatarUpdated) handlers.onContactAvatarUpdated(payload);
-      });
-
-      socket.on('whatsapp:contacts_synced', (payload) => {
-        if (handlers.onContactsSynced) handlers.onContactsSynced(payload);
-      });
-
-      return socket;
+      return null;
     },
 
     disconnectSocket() {
       if (socket) {
         try {
           socket.disconnect();
-        } catch {}
+        } catch { }
         socket = null;
       }
     },

@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { ChannelType, ConnectionProvider, ConnectionStatus } from '@prisma/client';
+import { ChannelType, ConnectionProvider, ConnectionStatus, UserRole } from '@prisma/client';
 import { z } from 'zod';
 
 import { prisma } from '../../shared/database/prisma.js';
@@ -11,17 +11,17 @@ const createConnectionSchema = z.object({
   name: z.string().trim().min(2, 'Informe o nome da conexão.').max(120),
   channel: z.enum(['WHATSAPP', 'WEBCHAT', 'INSTAGRAM']).default('WHATSAPP'),
   provider: z.enum(['BAILEYS', 'META_CLOUD', 'EVOLUTION', 'WIDGET']).optional(),
-  identifier: z.string().trim().max(120).optional(),
-  departmentId: z.string().uuid().optional().nullable(),
-  departmentName: z.string().trim().optional(),
+  identifier: z.string().trim().max(120).optional().nullable(),
+  departmentId: z.string().uuid().optional().nullable().or(z.literal('')),
+  departmentName: z.string().trim().optional().nullable(),
   autoStartQr: z.boolean().optional().default(true),
 });
 
 const updateConnectionSchema = z.object({
   name: z.string().trim().min(2).max(120).optional(),
-  identifier: z.string().trim().max(120).optional(),
-  departmentId: z.string().uuid().optional().nullable(),
-  departmentName: z.string().trim().optional(),
+  identifier: z.string().trim().max(120).optional().nullable(),
+  departmentId: z.string().uuid().optional().nullable().or(z.literal('')),
+  departmentName: z.string().trim().optional().nullable(),
 });
 
 const updateStatusSchema = z.object({
@@ -32,6 +32,35 @@ function formatChannelLabel(channel: ChannelType): string {
   if (channel === ChannelType.WHATSAPP) return 'WhatsApp';
   if (channel === ChannelType.WEBCHAT) return 'WebChat';
   return 'Instagram';
+}
+
+function getConnectionOwnerMeta(metadata: unknown): {
+  ownerUserId: string | null;
+  ownerUserName: string | null;
+} {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    return { ownerUserId: null, ownerUserName: null };
+  }
+  const obj = metadata as Record<string, unknown>;
+  return {
+    ownerUserId: typeof obj.ownerUserId === 'string' ? obj.ownerUserId : null,
+    ownerUserName: typeof obj.ownerUserName === 'string' ? obj.ownerUserName : null,
+  };
+}
+
+function assertCanManageConnection(
+  tenant: { userId: string; role: UserRole },
+  metadata: unknown
+): void {
+  if (tenant.role === UserRole.ADMIN) return;
+  const { ownerUserId } = getConnectionOwnerMeta(metadata);
+  if (ownerUserId && ownerUserId !== tenant.userId) {
+    throw new AppError(
+      403,
+      'CONNECTION_FORBIDDEN',
+      'Você só pode alterar ou remover conexões WhatsApp criadas pela sua própria conta.'
+    );
+  }
 }
 
 export async function connectionsRoutes(app: FastifyInstance): Promise<void> {
@@ -67,6 +96,10 @@ export async function connectionsRoutes(app: FastifyInstance): Promise<void> {
         else sessionState = 'disconnected';
       }
 
+      const ownerMeta = getConnectionOwnerMeta(c.metadata);
+      const canManage =
+        tenant.role === UserRole.ADMIN || !ownerMeta.ownerUserId || ownerMeta.ownerUserId === tenant.userId;
+
       return {
         id: c.id,
         name: c.name,
@@ -81,6 +114,9 @@ export async function connectionsRoutes(app: FastifyInstance): Promise<void> {
         dbStatus: c.status,
         sessionState,
         qrDataUrl: runtime?.qrDataUrl ?? null,
+        ownerUserId: ownerMeta.ownerUserId,
+        ownerUserName: ownerMeta.ownerUserName,
+        canManage,
         createdAt: c.createdAt.toISOString(),
       };
     });
@@ -93,7 +129,7 @@ export async function connectionsRoutes(app: FastifyInstance): Promise<void> {
     const tenant = getTenantContext(request);
     const input = createConnectionSchema.parse(request.body);
 
-    let departmentId = input.departmentId ?? null;
+    let departmentId = input.departmentId ? input.departmentId : null;
     if (!departmentId && input.departmentName) {
       const dept = await prisma.department.findFirst({
         where: { organizationId: tenant.organizationId, name: input.departmentName },
@@ -124,6 +160,10 @@ export async function connectionsRoutes(app: FastifyInstance): Promise<void> {
           input.channel === 'WHATSAPP' && provider === ConnectionProvider.BAILEYS
             ? ConnectionStatus.DISCONNECTED
             : ConnectionStatus.ACTIVE,
+        metadata: {
+          ownerUserId: tenant.userId,
+          ownerUserName: tenant.name ?? tenant.email,
+        },
       },
       include: {
         defaultDepartment: { select: { id: true, name: true } },
@@ -160,6 +200,9 @@ export async function connectionsRoutes(app: FastifyInstance): Promise<void> {
               : 'connecting'
             : 'connected',
         qrDataUrl: runtime.qrDataUrl,
+        ownerUserId: tenant.userId,
+        ownerUserName: tenant.name ?? tenant.email,
+        canManage: true,
       },
     });
   });
@@ -176,6 +219,7 @@ export async function connectionsRoutes(app: FastifyInstance): Promise<void> {
     if (!conn) {
       throw new AppError(404, 'CONNECTION_NOT_FOUND', 'Conexão WhatsApp não encontrada.');
     }
+    assertCanManageConnection(tenant, conn.metadata);
 
     if (conn.provider !== ConnectionProvider.BAILEYS) {
       await prisma.connection.update({
@@ -238,8 +282,10 @@ export async function connectionsRoutes(app: FastifyInstance): Promise<void> {
     if (!existing) {
       throw new AppError(404, 'CONNECTION_NOT_FOUND', 'Conexão não encontrada.');
     }
+    assertCanManageConnection(tenant, existing.metadata);
 
-    let departmentId = input.departmentId;
+    let departmentId: string | null | undefined =
+      input.departmentId === '' ? null : input.departmentId;
     if (departmentId === undefined && input.departmentName) {
       const dept = await prisma.department.findFirst({
         where: { organizationId: tenant.organizationId, name: input.departmentName },
@@ -252,7 +298,7 @@ export async function connectionsRoutes(app: FastifyInstance): Promise<void> {
       where: { id: existing.id },
       data: {
         ...(input.name ? { name: input.name } : {}),
-        ...(input.identifier !== undefined ? { identifier: input.identifier } : {}),
+        ...(input.identifier !== undefined ? { identifier: input.identifier?.trim() || '-' } : {}),
         ...(departmentId !== undefined ? { defaultDepartmentId: departmentId } : {}),
       },
       include: { defaultDepartment: { select: { id: true, name: true } } },
@@ -281,6 +327,7 @@ export async function connectionsRoutes(app: FastifyInstance): Promise<void> {
     if (!conn) {
       throw new AppError(404, 'CONNECTION_NOT_FOUND', 'Conexão não encontrada.');
     }
+    assertCanManageConnection(tenant, conn.metadata);
 
     if (action === 'archive') {
       await whatsappManager.disconnectSession(conn.id, tenant.organizationId, false);
@@ -378,6 +425,7 @@ export async function connectionsRoutes(app: FastifyInstance): Promise<void> {
     if (!conn) {
       throw new AppError(404, 'CONNECTION_NOT_FOUND', 'Conexão não encontrada.');
     }
+    assertCanManageConnection(tenant, conn.metadata);
 
     await whatsappManager.disconnectSession(conn.id, tenant.organizationId, true);
 

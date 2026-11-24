@@ -5,10 +5,11 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SMV Sac — Atendimento Omnichannel</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23FACC15'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-family='Inter,Arial,sans-serif' font-weight='800' font-size='14' fill='%2309090B'%3ES%3C/text%3E%3C/svg%3E" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=20261124-04" />
+  <link rel="stylesheet" href="styles.css?v=20261124-07" />
 </head>
 
 <body>
@@ -190,6 +191,15 @@
           </svg>
         </button>
 
+        <button class="top-icon-btn hidden" id="btnNavUsers" data-view="users" data-tip="Usuários (Administrador)">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+            <circle cx="12" cy="10" r="2.5" />
+            <path d="M8.5 16.5a4.2 4.2 0 0 1 7 0" />
+          </svg>
+        </button>
+
         <span class="topbar-divider"></span>
 
         <button class="top-icon-btn" id="btnOpenCommandBar" data-tip="Busca rápida (Ctrl+K)">
@@ -300,7 +310,10 @@
 
           <div class="topbar-dropdown profile-dropdown hidden" id="userProfileMenu" role="menu">
             <div class="profile-menu-head">
-              <div class="profile-user-name" id="profileMenuUserName">Ransay</div>
+              <div>
+                <div class="profile-user-name" id="profileMenuUserName">Ransay</div>
+                <span class="role-pill admin profile-role-badge" id="profileRoleBadge">Administrador</span>
+              </div>
               <button type="button" class="profile-status-chip" id="btnProfileCycleStatus"
                 title="Clique para alternar disponibilidade">
                 <span class="profile-status-dot online" id="profileStatusDot"></span>
@@ -321,6 +334,15 @@
             <div class="conn-menu-divider"></div>
 
             <div class="profile-menu-list">
+              <button type="button" class="conv-popover-item hidden" id="btnProfileUsers" role="menuitem">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                  stroke-linejoin="round">
+                  <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                  <circle cx="12" cy="10" r="2.5" />
+                  <path d="M8.5 16.5a4.2 4.2 0 0 1 7 0" />
+                </svg>
+                <span>Gerenciar usuários</span>
+              </button>
               <button type="button" class="conv-popover-item" id="btnProfileAccount" role="menuitem">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
                   stroke-linejoin="round">
@@ -846,7 +868,8 @@
             </div>
             <div class="contacts-actions">
               <!-- Botão Sincronizar Contatos (WhatsApp) -->
-              <button type="button" class="btn secondary pill" id="btnContactsSyncWa" title="Sincronizar agenda do WhatsApp">
+              <button type="button" class="btn secondary pill" id="btnContactsSyncWa"
+                title="Sincronizar agenda do WhatsApp">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
                   stroke-linecap="round" stroke-linejoin="round">
                   <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
@@ -1027,7 +1050,135 @@
           </div>
         </div>
       </section>
+
+      <!-- ==================== VIEW 5: USUÁRIOS (APENAS ADMINISTRADOR) ==================== -->
+      <section class="view-panel" id="view-users">
+        <div class="centered-page">
+          <div class="connections-top">
+            <div style="display:flex;align-items:center;gap:10px;">
+              <h1>Usuários</h1>
+              <span class="u-count hidden" id="usersTotalBadge">0</span>
+            </div>
+            <div class="connections-controls">
+              <div class="pill-search wide">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="11" cy="11" r="8" />
+                  <path d="m21 21-4.3-4.3" />
+                </svg>
+                <input type="text" id="usersSearchInput" placeholder="Buscar por nome ou e-mail..." />
+              </div>
+              <select id="usersRoleFilter" class="pill-filter-select" title="Filtrar por perfil">
+                <option value="all">Perfil: Todos</option>
+                <option value="ADMIN">Administrador</option>
+                <option value="USER">User</option>
+              </select>
+              <button type="button" class="btn-contacts-refresh" id="btnUsersRefresh" title="Atualizar usuários"
+                aria-label="Atualizar lista de usuários">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+                  <polyline points="21 3 21 9 15 9" />
+                </svg>
+              </button>
+              <button type="button" class="btn primary pill" id="btnOpenNewUserModal">+ Novo Usuário</button>
+            </div>
+          </div>
+
+          <div class="users-info-banner">
+            <span>🛡️ <strong>Administrador</strong> pode inserir e remover usuários e gerenciar todas as
+              conexões.</span>
+            <span>📱 <strong>User</strong> acessa o atendimento e pode conectar seu próprio WhatsApp via QR Code em
+              <em>Conexões</em>.</span>
+          </div>
+
+          <div class="clean-table-card">
+            <table class="clean-table">
+              <thead>
+                <tr>
+                  <th>Usuário</th>
+                  <th>Perfil</th>
+                  <th>WhatsApp conectado</th>
+                  <th>Status</th>
+                  <th style="text-align:right;">Ações</th>
+                </tr>
+              </thead>
+              <tbody id="usersTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
     </main>
+  </div>
+
+  <!-- ========== MODAL NOVO USUÁRIO (APENAS ADMINISTRADOR) ========== -->
+  <div class="modal-backdrop hidden" id="addUserModal" role="dialog" aria-modal="true"
+    aria-labelledby="addUserModalTitle">
+    <div class="modal-card">
+      <div class="modal-head">
+        <div>
+          <h3 id="addUserModalTitle">Novo Usuário</h3>
+          <p class="modal-sub">Cadastre um Administrador ou User (que poderá conectar seu WhatsApp via QR Code).</p>
+        </div>
+        <button type="button" class="icon-btn" id="btnCloseAddUser" title="Fechar">×</button>
+      </div>
+      <div class="modal-body">
+        <label for="newUserName">Nome completo</label>
+        <input type="text" id="newUserName" class="field-input" placeholder="Ex: Maria Oliveira" required />
+
+        <label for="newUserEmail">E-mail de acesso</label>
+        <input type="email" id="newUserEmail" class="field-input" placeholder="maria@supermegavendas.com" required />
+
+        <label for="newUserRole">Perfil de acesso</label>
+        <select id="newUserRole" class="field-select">
+          <option value="USER" selected>User — Atende e conecta seu WhatsApp via QR Code</option>
+          <option value="ADMIN">Administrador — Insere/remove usuários e gerencia tudo</option>
+        </select>
+
+        <label for="newUserPassword">Senha inicial</label>
+        <div class="password-wrap">
+          <input type="password" id="newUserPassword" class="field-input" placeholder="Mínimo 8 caracteres"
+            autocomplete="new-password" minlength="8" required />
+          <button type="button" class="pwd-eye-btn" id="btnToggleNewUserPwd" title="Mostrar/ocultar senha"
+            aria-label="Mostrar ou ocultar senha">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+              <circle cx="12" cy="12" r="3" />
+            </svg>
+          </button>
+        </div>
+        <ul class="pwd-rules-list" id="newUserPasswordRules" aria-live="polite">
+          <li class="pwd-rule" data-rule="length"><span class="pwd-rule-icon">•</span> Mínimo de 8 caracteres</li>
+          <li class="pwd-rule" data-rule="upper"><span class="pwd-rule-icon">•</span> Letra maiúscula (A-Z)</li>
+          <li class="pwd-rule" data-rule="lower"><span class="pwd-rule-icon">•</span> Letra minúscula (a-z)</li>
+          <li class="pwd-rule" data-rule="number"><span class="pwd-rule-icon">•</span> Número (0-9)</li>
+          <li class="pwd-rule" data-rule="special"><span class="pwd-rule-icon">•</span> Caractere especial (!@#$%...)
+          </li>
+        </ul>
+
+        <div class="auth-error hidden" id="newUserError" style="margin-top:12px;margin-bottom:0;"></div>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn secondary pill" id="btnCancelAddUser">Cancelar</button>
+        <button type="button" class="btn primary pill" id="btnSaveAddUser">Criar usuário</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== MODAL REMOVER USUÁRIO (APENAS ADMINISTRADOR) ========== -->
+  <div class="modal-backdrop hidden" id="deleteUserModal" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3>Remover usuário</h3>
+        <button type="button" class="icon-btn" id="btnCloseDeleteUser">×</button>
+      </div>
+      <div class="modal-body">
+        <p class="delete-confirm-text" id="deleteUserMessage"></p>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn secondary pill" id="btnCancelDeleteUser">Cancelar</button>
+        <button type="button" class="btn danger pill" id="btnConfirmDeleteUser">Remover</button>
+      </div>
+    </div>
   </div>
 
   <!-- ========== MODAL ADICIONAR / EDITAR CONEXÃO ========== -->
@@ -1174,7 +1325,8 @@
             <h4>3. Direitos do Titular (Art. 18 da LGPD)</h4>
             <p>Você pode solicitar a qualquer momento a confirmação, acesso, correção, portabilidade, eliminação de
               dados ou a revogação deste consentimento pelo canal do Encarregado (DPO):
-              <strong>privacidade@smvsac.com.br</strong>.</p>
+              <strong>privacidade@smvsac.com.br</strong>.
+            </p>
           </div>
         </div>
 
@@ -1219,12 +1371,14 @@
   </div>
 
   <!-- ========== MODAL NOVA CONVERSA (AGENDA ESTILO DIGISAC) ========== -->
-  <div class="modal-backdrop hidden" id="newConversationModal" role="dialog" aria-modal="true" aria-labelledby="newConvModalTitle">
+  <div class="modal-backdrop hidden" id="newConversationModal" role="dialog" aria-modal="true"
+    aria-labelledby="newConvModalTitle">
     <div class="modal-card wide">
       <div class="modal-head">
         <div>
           <h3 id="newConvModalTitle">Nova Conversa</h3>
-          <p class="modal-sub">Pesquise qualquer contato da agenda sincronizada para iniciar ou retomar o atendimento.</p>
+          <p class="modal-sub">Pesquise qualquer contato da agenda sincronizada para iniciar ou retomar o atendimento.
+          </p>
         </div>
         <button type="button" class="icon-btn" id="btnCloseNewConv" title="Fechar">×</button>
       </div>
@@ -1234,7 +1388,8 @@
             <circle cx="11" cy="11" r="8" />
             <path d="m21 21-4.3-4.3" />
           </svg>
-          <input type="text" id="newConvSearchInput" placeholder="Pesquisar por nome, telefone (com ou sem 55) ou e-mail..." autocomplete="off" />
+          <input type="text" id="newConvSearchInput"
+            placeholder="Pesquisar por nome, telefone (com ou sem 55) ou e-mail..." autocomplete="off" />
         </div>
         <div class="new-conv-list" id="newConvResultsList"></div>
       </div>
@@ -1608,10 +1763,10 @@
   <!-- ========== TOASTS ========== -->
   <div class="toast-stack" id="toastStack"></div>
 
-  <script src="http://localhost:3333/socket.io/socket.io.js"></script>
-  <script src="api.js?v=20261124-04"></script>
-  <script src="data.js?v=20261124-04"></script>
-  <script src="app.js?v=20261124-04"></script>
+  <script src="config.js?v=20261124-07"></script>
+  <script src="api.js?v=20261124-07"></script>
+  <script src="data.js?v=20261124-07"></script>
+  <script src="app.js?v=20261124-07"></script>
 </body>
 
 </html>

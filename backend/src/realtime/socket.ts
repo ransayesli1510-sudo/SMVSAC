@@ -1,7 +1,7 @@
 import type { Server as HttpServer } from 'node:http';
 import type { FastifyInstance } from 'fastify';
 import { Server as SocketIOServer } from 'socket.io';
-import { env } from '../config/env.js';
+import { getCorsOrigins } from '../config/env.js';
 import type { AuthJwtPayload } from '../shared/http/authenticate.js';
 
 let ioInstance: SocketIOServer | null = null;
@@ -10,9 +10,17 @@ let ioInstance: SocketIOServer | null = null;
 const onlineUsersByOrg = new Map<string, Set<string>>();
 
 export function initRealtime(httpServer: HttpServer, app: FastifyInstance): SocketIOServer {
+  const allowedOrigins = getCorsOrigins();
   const io = new SocketIOServer(httpServer, {
     cors: {
-      origin: env.CORS_ORIGIN.split(',').map((o) => o.trim()),
+      origin: (origin, cb) => {
+        if (!origin) return cb(null, true);
+        const normalized = origin.replace(/\/+$/, '');
+        if (allowedOrigins.includes('*') || allowedOrigins.includes(normalized)) {
+          return cb(null, true);
+        }
+        return cb(null, false);
+      },
       credentials: true,
     },
   });

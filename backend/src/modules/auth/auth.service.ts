@@ -17,6 +17,7 @@ import type {
 
 const BCRYPT_ROUNDS = 12;
 const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000; // 1 hora
+const PRIMARY_ADMIN_EMAIL = 'ransay@supermegavendas.com';
 
 function hashToken(rawToken: string): string {
   return crypto.createHash('sha256').update(rawToken).digest('hex');
@@ -97,6 +98,8 @@ function serializeUserProfile(user: {
     name: user.name,
     email: user.email,
     role: user.role,
+    profile: user.role === UserRole.ADMIN ? 'ADMIN' : 'USER',
+    profileLabel: user.role === UserRole.ADMIN ? 'Administrador' : 'User',
     availability: user.availability,
     avatarUrl: user.avatarUrl,
     lastSeenAt: user.lastSeenAt,
@@ -127,11 +130,15 @@ export const authService = {
       throw new AppError(401, 'INVALID_CREDENTIALS', 'E-mail ou senha inválidos.');
     }
 
+    const ensurePrimaryAdminRole =
+      user.email.toLowerCase() === PRIMARY_ADMIN_EMAIL && user.role !== UserRole.ADMIN;
+
     const updated = await prisma.user.update({
       where: { id: user.id },
       data: {
         lastSeenAt: new Date(),
         availability: user.availability === AgentAvailability.OFFLINE ? AgentAvailability.ONLINE : user.availability,
+        ...(ensurePrimaryAdminRole ? { role: UserRole.ADMIN } : {}),
       },
       include: {
         organization: { select: { id: true, name: true, slug: true, plan: true } },

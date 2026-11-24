@@ -16,20 +16,22 @@ const REFRESH_COOKIE_NAME = 'smv_refresh_token';
 const REFRESH_COOKIE_MAX_AGE_SEC = 7 * 24 * 60 * 60; // 7 dias
 
 function setRefreshCookie(reply: FastifyReply, refreshToken: string): void {
+  const isProd = env.NODE_ENV === 'production';
   reply.setCookie(REFRESH_COOKIE_NAME, refreshToken, {
     httpOnly: true,
-    secure: env.NODE_ENV === 'production',
-    sameSite: 'lax',
+    secure: isProd,
+    sameSite: isProd ? 'none' : 'lax',
     path: '/api/v1/auth',
     maxAge: REFRESH_COOKIE_MAX_AGE_SEC,
   });
 }
 
 function clearRefreshCookie(reply: FastifyReply): void {
+  const isProd = env.NODE_ENV === 'production';
   reply.clearCookie(REFRESH_COOKIE_NAME, {
     httpOnly: true,
-    secure: env.NODE_ENV === 'production',
-    sameSite: 'lax',
+    secure: isProd,
+    sameSite: isProd ? 'none' : 'lax',
     path: '/api/v1/auth',
   });
 }

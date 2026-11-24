@@ -7,11 +7,12 @@ import multipart from '@fastify/multipart';
 import { Prisma } from '@prisma/client';
 import { ZodError } from 'zod';
 
-import { env } from './config/env.js';
+import { env, getCorsOrigins } from './config/env.js';
 import { prisma } from './shared/database/prisma.js';
 import { AppError } from './shared/http/errors.js';
 
 import { authRoutes } from './modules/auth/auth.routes.js';
+import { usersRoutes } from './modules/users/users.routes.js';
 import { lgpdRoutes } from './modules/lgpd/lgpd.routes.js';
 import { connectionsRoutes } from './modules/connections/connections.routes.js';
 import { webhooksRoutes } from './modules/webhooks/webhooks.routes.js';
@@ -28,9 +29,19 @@ export async function buildApp(): Promise<FastifyInstance> {
     trustProxy: true,
   });
 
-  await app.register(helmet);
+  await app.register(helmet, {
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+  });
+  const allowedOrigins = getCorsOrigins();
   await app.register(cors, {
-    origin: env.CORS_ORIGIN.split(',').map((o) => o.trim()),
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true);
+      const normalized = origin.replace(/\/+$/, '');
+      if (allowedOrigins.includes('*') || allowedOrigins.includes(normalized)) {
+        return cb(null, true);
+      }
+      return cb(null, false);
+    },
     credentials: true,
   });
   await app.register(cookie);
@@ -86,6 +97,14 @@ export async function buildApp(): Promise<FastifyInstance> {
     });
   });
 
+  // Rota raiz leve para health probes de plataformas (Railway / Render / VPS)
+  app.get('/', async (_request, reply) => {
+    return reply.send({
+      service: 'smv-sac-backend',
+      status: 'ok',
+    });
+  });
+
   // Healthcheck (verifica conectividade com o Supabase PostgreSQL)
   app.get('/health', async (_request, reply) => {
     try {
@@ -108,6 +127,7 @@ export async function buildApp(): Promise<FastifyInstance> {
 
   // Módulos de domínio sob /api/v1
   await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  await app.register(usersRoutes, { prefix: '/api/v1/users' });
   await app.register(lgpdRoutes, { prefix: '/api/v1/lgpd' });
   await app.register(connectionsRoutes, { prefix: '/api/v1/connections' });
   await app.register(webhooksRoutes, { prefix: '/api/v1/webhooks' });

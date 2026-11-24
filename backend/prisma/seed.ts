@@ -25,11 +25,14 @@ async function main(): Promise<void> {
     },
   });
 
-  // 2. Usuário Admin inicial (mesmas credenciais da demo)
+  // 2. Usuário Administrador principal (ransay@supermegavendas.com)
   const adminPasswordHash = await bcrypt.hash('@Smv2025', 10);
   await prisma.user.upsert({
     where: { email: 'ransay@supermegavendas.com' },
-    update: {},
+    update: {
+      role: UserRole.ADMIN,
+      isActive: true,
+    },
     create: {
       organizationId: org.id,
       name: 'Ransay',

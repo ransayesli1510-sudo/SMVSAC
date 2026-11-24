@@ -39,11 +39,17 @@
     waQrPollInFlight: false,
     fallbackPollTimer: null,
     currentUser: {
+      id: null,
       name: 'Ransay',
       email: 'ransay@supermegavendas.com',
-      role: 'Admin',
+      roleCode: 'ADMIN',
+      role: 'Administrador',
       subdomain: 'supermegavendas',
     },
+    usersList: [],
+    usersSearch: '',
+    usersRoleFilter: 'all',
+    deletingUserId: null,
     theme: localStorage.getItem('smv_sac_theme') || 'dark',
     view: 'conversations', // conversations | connections | contacts | reports | ai
     tab: 'mine', // mine | queue | all
@@ -175,6 +181,69 @@
       ],
     })),
   };
+
+  const PRIMARY_ADMIN_EMAIL = 'ransay@supermegavendas.com';
+
+  function normalizeUserProfile(rawRole, email = '') {
+    const cleanEmail = String(email || '').trim().toLowerCase();
+    const upper = String(rawRole || '').trim().toUpperCase();
+    const isAdmin =
+      cleanEmail === PRIMARY_ADMIN_EMAIL ||
+      upper === 'ADMIN' ||
+      upper === 'ADMINISTRADOR';
+    return {
+      roleCode: isAdmin ? 'ADMIN' : 'USER',
+      roleLabel: isAdmin ? 'Administrador' : 'User',
+    };
+  }
+
+  function isCurrentUserAdmin() {
+    return (
+      state.currentUser?.roleCode === 'ADMIN' ||
+      String(state.currentUser?.email || '').toLowerCase() === PRIMARY_ADMIN_EMAIL
+    );
+  }
+
+  function evaluatePasswordStrength(pwd) {
+    const value = String(pwd || '');
+    const checks = {
+      length: value.length >= 8,
+      upper: /[A-Z]/.test(value),
+      lower: /[a-z]/.test(value),
+      number: /[0-9]/.test(value),
+      special: /[^A-Za-z0-9\s]/.test(value),
+    };
+    const valid = Object.values(checks).every(Boolean);
+    return { checks, valid };
+  }
+
+  function updatePasswordRulesUI(containerSelector, pwd, showInvalidState = false) {
+    const value = String(pwd || '');
+    const { checks } = evaluatePasswordStrength(value);
+    const hasInput = value.length > 0;
+    $$(`${containerSelector} .pwd-rule`).forEach((item) => {
+      const rule = item.dataset.rule;
+      const ok = Boolean(checks[rule]);
+      item.classList.toggle('valid', ok);
+      item.classList.toggle('invalid', !ok && (showInvalidState || hasInput));
+      const icon = item.querySelector('.pwd-rule-icon');
+      if (icon) {
+        icon.textContent = ok ? '✓' : showInvalidState || hasInput ? '✕' : '•';
+      }
+    });
+  }
+
+  function syncRoleVisibilityUI() {
+    const isAdmin = isCurrentUserAdmin();
+    $('#btnNavUsers')?.classList.toggle('hidden', !isAdmin);
+    $('#btnProfileUsers')?.classList.toggle('hidden', !isAdmin);
+    const badge = $('#profileRoleBadge');
+    if (badge) {
+      badge.textContent = isAdmin ? 'Administrador' : 'User';
+      badge.classList.toggle('admin', isAdmin);
+      badge.classList.toggle('user', !isAdmin);
+    }
+  }
 
   const AGENT_STATUSES = [
     { key: 'online', label: 'Online' },
@@ -673,22 +742,8 @@
   async function openConversationForContact(contact) {
     if (!contact) return;
 
-    // Fallback offline / demo local
-    if (!state.apiConnected || !API) {
-      const existing = state.conversations.find(
-        (c) =>
-          (contact.conversationId && String(c.id) === String(contact.conversationId)) ||
-          (contact.id && String(c.contact?.id) === String(contact.id)) ||
-          c.contact?.name === contact.name
-      );
-      if (existing) {
-        state.selectedConvId = existing.id;
-        state.tab = 'all';
-        state.statusFilter = 'all';
-        closeNewConversationModal();
-        setView('conversations');
-        setTimeout(() => $('#composerInput')?.focus(), 30);
-      }
+    if (!API?.getToken()) {
+      forceRedirectToLogin('Sua sessão expirou. Faça login novamente para continuar.');
       return;
     }
 
@@ -986,13 +1041,29 @@
     }, 2500);
   }
 
+  function isNetworkOfflineError(err) {
+    return Boolean(
+      err &&
+        (err.isNetworkError ||
+          err.status === 0 ||
+          /failed to fetch|networkerror|load failed/i.test(String(err.message || '')))
+    );
+  }
+
+  function formatApiErrorMessage(err, fallback) {
+    if (isNetworkOfflineError(err)) {
+      return `Servidor da API indisponível (${API?.BASE_URL || 'back-end'}). Verifique se o servidor está online.`;
+    }
+    return err?.message || fallback;
+  }
+
   async function openWhatsAppQrModal(existingConn = null) {
-    if (!state.apiConnected) {
-      toast('Inicie o servidor back-end (npm run dev na porta 3333) e faça login novamente para gerar o QR Code real do WhatsApp.');
-      openConnectionFormModal(existingConn, 'WhatsApp');
+    if (!API?.getToken()) {
+      forceRedirectToLogin('Sua sessão expirou. Faça login novamente para parear o WhatsApp via QR Code.');
       return;
     }
 
+    state.apiConnected = true;
     $('#whatsappQrModal').classList.remove('hidden');
 
     if (existingConn) {
@@ -1006,7 +1077,7 @@
         updateWaQrModalState(snap);
         startWaQrPolling(existingConn.id);
       } catch (err) {
-        toast(`Erro ao gerar QR Code: ${err.message}`);
+        toast(`❌ ${formatApiErrorMessage(err, 'Erro ao gerar QR Code.')}`);
       }
     } else {
       state.waQrConnectionId = null;
@@ -1222,6 +1293,10 @@
   // NAVEGAÇÃO TOPBAR
   // ========================================================================
   function setView(viewName) {
+    if (viewName === 'users' && !isCurrentUserAdmin()) {
+      toast('Acesso restrito ao perfil Administrador.');
+      viewName = 'conversations';
+    }
     state.view = viewName;
     $$('.view-panel').forEach((p) => p.classList.remove('active'));
     const panel = $(`#view-${viewName}`);
@@ -1243,6 +1318,12 @@
       }
     }
     if (viewName === 'reports') renderReports();
+    if (viewName === 'users') {
+      renderUsers();
+      if (state.apiConnected) {
+        void loadBackendUsers();
+      }
+    }
   }
 
   function updateGlobalCounts() {
@@ -1997,7 +2078,7 @@
                 </div>
                 <div class="conn-meta-row">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="2" width="16" height="20" rx="2"/><line x1="9" y1="22" x2="9" y2="2"/></svg>
-                  <span>${escapeHtml(c.department)}</span>
+                  <span>${escapeHtml(c.department)}${c.ownerUserName ? ` • Resp.: ${escapeHtml(c.ownerUserName)}` : ''}</span>
                 </div>
                 <div class="conn-status-row">
                   <span class="status-pill ${statusMeta.cls}">
@@ -2525,6 +2606,188 @@
   }
 
   // ========================================================================
+  // VIEW 5: USUÁRIOS (GESTÃO DE PERFIS ADMINISTRADOR E USER)
+  // ========================================================================
+  async function loadBackendUsers() {
+    if (!API?.getToken() || !isCurrentUserAdmin()) return;
+    try {
+      const data = await API.getUsers();
+      state.usersList = Array.isArray(data.users) ? data.users : [];
+      if (state.view === 'users') renderUsers();
+    } catch (err) {
+      console.warn('[API] Falha ao carregar usuários:', err);
+    }
+  }
+
+  function renderUsers() {
+    const tbody = $('#usersTableBody');
+    if (!tbody) return;
+
+    const source = state.usersList;
+    const badge = $('#usersTotalBadge');
+    if (badge) {
+      badge.textContent = source.length;
+      badge.classList.toggle('hidden', source.length === 0);
+    }
+
+    const q = (state.usersSearch || '').trim().toLowerCase();
+    const roleFilter = state.usersRoleFilter || 'all';
+
+    const filtered = source.filter((u) => {
+      if (roleFilter !== 'all' && u.role !== roleFilter) return false;
+      if (q) {
+        const match =
+          (u.name || '').toLowerCase().includes(q) ||
+          (u.email || '').toLowerCase().includes(q) ||
+          (u.profileLabel || '').toLowerCase().includes(q);
+        if (!match) return false;
+      }
+      return true;
+    });
+
+    if (filtered.length === 0) {
+      tbody.innerHTML = `
+        <tr>
+          <td colspan="5" style="text-align:center;padding:36px 16px;color:var(--text-muted);">
+            Nenhum usuário encontrado com os filtros aplicados.
+          </td>
+        </tr>
+      `;
+      return;
+    }
+
+    tbody.innerHTML = filtered
+      .map((u) => {
+        const isAdmin = u.role === 'ADMIN';
+        const isPrimary = Boolean(u.isPrimaryAdmin) || String(u.email || '').toLowerCase() === PRIMARY_ADMIN_EMAIL;
+        const isSelf =
+          (state.currentUser.id && u.id === state.currentUser.id) ||
+          String(u.email || '').toLowerCase() === String(state.currentUser.email || '').toLowerCase();
+        const parts = (u.name || 'US').trim().split(/\s+/);
+        const initials = ((parts[0]?.[0] || 'U') + (parts[1]?.[0] || parts[0]?.[1] || 'S')).toUpperCase();
+        const waCount = u.whatsappConnectionsCount || 0;
+        const waSummary =
+          waCount > 0
+            ? `${waCount} WhatsApp${waCount > 1 ? 's' : ''}`
+            : 'Pronto para parear QR';
+        const statusLabel =
+          u.availability === 'ONLINE'
+            ? 'Online'
+            : u.availability === 'BUSY'
+              ? 'Ocupado'
+              : 'Offline';
+        const statusCls =
+          u.availability === 'ONLINE'
+            ? ''
+            : u.availability === 'BUSY'
+              ? 'paused'
+              : 'archived';
+
+        const canMutate = !isPrimary && !isSelf;
+
+        return `
+          <tr>
+            <td>
+              <div style="display:flex;align-items:center;gap:10px;">
+                <div class="avatar xs ${isAdmin ? 'yellow-avatar' : ''}">${escapeHtml(initials)}</div>
+                <div>
+                  <div style="font-weight:600;display:flex;align-items:center;flex-wrap:wrap;">
+                    <span>${escapeHtml(u.name)}</span>
+                    ${isPrimary ? '<span class="role-pill primary-badge">Admin principal</span>' : ''}
+                    ${isSelf && !isPrimary ? '<span class="role-pill primary-badge">Você</span>' : ''}
+                  </div>
+                  <div style="font-size:11.5px;color:var(--text-muted);">${escapeHtml(u.email)}</div>
+                </div>
+              </div>
+            </td>
+            <td>
+              <span class="role-pill ${isAdmin ? 'admin' : 'user'}">
+                ${isAdmin ? '🛡️ Administrador' : '👤 User'}
+              </span>
+            </td>
+            <td>
+              <span class="header-pill connection">${escapeHtml(waSummary)}</span>
+            </td>
+            <td>
+              <span class="status-pill ${statusCls}"><i></i> ${escapeHtml(statusLabel)}</span>
+            </td>
+            <td style="text-align:right;">
+              <div class="user-actions-cell">
+                ${
+                  canMutate
+                    ? `
+                      <button type="button" class="btn secondary pill sm-action" data-toggle-user-role="${escapeHtml(u.id)}" data-next-role="${isAdmin ? 'USER' : 'ADMIN'}">
+                        ${isAdmin ? 'Tornar User' : 'Tornar Admin'}
+                      </button>
+                      <button type="button" class="btn danger-outline pill sm-action" data-delete-user-id="${escapeHtml(u.id)}">
+                        Remover
+                      </button>
+                    `
+                    : `<span style="font-size:11.5px;color:var(--text-muted);">Protegido</span>`
+                }
+              </div>
+            </td>
+          </tr>
+        `;
+      })
+      .join('');
+
+    $$('[data-toggle-user-role]').forEach((btn) => {
+      btn.onclick = async () => {
+        const userId = btn.dataset.toggleUserRole;
+        const nextRole = btn.dataset.nextRole;
+        if (!API?.getToken()) {
+          forceRedirectToLogin('Sua sessão expirou. Faça login novamente.');
+          return;
+        }
+        try {
+          const res = await API.updateUserRole(userId, nextRole);
+          await loadBackendUsers();
+          toast(res.message || 'Perfil atualizado com sucesso!');
+        } catch (err) {
+          toast(`❌ ${formatApiErrorMessage(err, 'Erro ao alterar perfil.')}`);
+        }
+      };
+    });
+
+    $$('[data-delete-user-id]').forEach((btn) => {
+      btn.onclick = () => {
+        const userId = btn.dataset.deleteUserId;
+        const target = source.find((x) => x.id === userId);
+        if (!target) return;
+        state.deletingUserId = target.id;
+        $('#deleteUserMessage').innerHTML = `Tem certeza que deseja remover o usuário <strong>${escapeHtml(target.name)}</strong> (${escapeHtml(target.email)})? Ele perderá o acesso imediatamente.`;
+        $('#deleteUserModal').classList.remove('hidden');
+      };
+    });
+  }
+
+  function openAddUserModal() {
+    if (!isCurrentUserAdmin()) {
+      toast('Apenas Administradores podem cadastrar novos usuários.');
+      return;
+    }
+    $('#newUserName').value = '';
+    $('#newUserEmail').value = '';
+    $('#newUserRole').value = 'USER';
+    $('#newUserPassword').value = '';
+    $('#newUserPassword').type = 'password';
+    $('#newUserError').classList.add('hidden');
+    updatePasswordRulesUI('#newUserPasswordRules', '', false);
+    $('#addUserModal').classList.remove('hidden');
+    setTimeout(() => $('#newUserName').focus(), 20);
+  }
+
+  function closeAddUserModal() {
+    $('#addUserModal')?.classList.add('hidden');
+  }
+
+  function closeDeleteUserModal() {
+    state.deletingUserId = null;
+    $('#deleteUserModal')?.classList.add('hidden');
+  }
+
+  // ========================================================================
   // BIND DE EVENTOS
   // ========================================================================
   function bindEvents() {
@@ -2543,12 +2806,13 @@
       DATA.currentAgent.initials = initials;
       const selfAgent = DATA.agents.find((a) => a.id === DATA.currentAgent.id);
       if (selfAgent) {
-        selfAgent.name = `${u.name} (${u.role === 'Admin' ? 'Admin' : 'Você'})`;
+        selfAgent.name = `${u.name} (${u.roleCode === 'ADMIN' ? 'Administrador' : 'User'})`;
       }
       $('#agentAvatarInitials').textContent = initials;
       $('#profileMenuUserName').textContent = u.name;
       $('#btnCopySubdomain').textContent = u.subdomain;
       $('#aboutSubdomainVal').textContent = u.subdomain;
+      syncRoleVisibilityUI();
 
       const st = AGENT_STATUSES[state.agentStatusIndex] || AGENT_STATUSES[0];
       $('#agentStatusDot').className = `status-dot ${st.key}`;
@@ -2585,6 +2849,11 @@
         navigator.clipboard.writeText(`${sub}.smvsac.com.br`).catch(() => { });
       }
       toast(`Subdomínio copiado: ${sub}`);
+    });
+
+    $('#btnProfileUsers')?.addEventListener('click', () => {
+      closeTopbarPopovers();
+      setView('users');
     });
 
     $('#btnProfileAccount').addEventListener('click', () => {
@@ -3016,25 +3285,7 @@
     });
 
     // Modal Transferir Chamado (para departamento e/ou atendente do mesmo domínio)
-    const getDomainAgents = () => {
-      const list = [...DATA.agents];
-      try {
-        const saved = JSON.parse(localStorage.getItem('smv_sac_users') || '[]');
-        if (Array.isArray(saved)) {
-          saved.forEach((u) => {
-            if (!u?.email || !u?.name) return;
-            const agId = 'usr_' + u.email.toLowerCase().replace(/[^a-z0-9]/g, '_');
-            if (!list.some((a) => a.id === agId) && u.name.toLowerCase() !== DATA.currentAgent.name.toLowerCase()) {
-              list.push({ id: agId, name: `${u.name} (${u.email})` });
-              if (!DATA.agents.some((a) => a.id === agId)) {
-                DATA.agents.push({ id: agId, name: u.name });
-              }
-            }
-          });
-        }
-      } catch { }
-      return list;
-    };
+    const getDomainAgents = () => [...DATA.agents];
 
     const closeTransferModal = () => {
       $('#transferTicketModal').classList.add('hidden');
@@ -3629,7 +3880,7 @@
       if (e.target === $('#addConnModal')) closeConnModal();
     });
 
-    $('#btnSaveAddConn').addEventListener('click', () => {
+    $('#btnSaveAddConn').addEventListener('click', async () => {
       const name = $('#newConnName').value.trim();
       if (!name) {
         toast('Informe o nome da conexão');
@@ -3637,13 +3888,27 @@
       }
 
       const channel = $('#newConnChannel').value;
-      const identifier = $('#newConnIdentifier').value.trim() || '-';
+      const rawIdentifier = $('#newConnIdentifier').value.trim();
+      const identifier = rawIdentifier || '-';
       const bot = $('#newConnBot').value;
       const department = $('#newConnDept').value;
+      const hasApiSession = Boolean(API && (state.apiConnected || API.getToken()));
 
       if (state.editingConnId) {
         const existing = state.connections.find((c) => c.id === state.editingConnId);
         if (existing) {
+          if (hasApiSession && existing.isRemote) {
+            try {
+              await API.updateConnection(existing.id, {
+                name,
+                identifier: rawIdentifier || '',
+                departmentName: department,
+              });
+            } catch (err) {
+              toast(`❌ ${formatApiErrorMessage(err, 'Erro ao atualizar conexão.')}`);
+              return;
+            }
+          }
           existing.name = name;
           existing.channel = channel;
           existing.identifier = identifier;
@@ -3652,27 +3917,65 @@
           pushConnectionEvent(existing, 'Configurações da conexão atualizadas', 'info');
           toast(`Conexão "${name}" atualizada!`);
         }
-      } else {
-        const created = {
-          id: 'conn_' + Date.now(),
-          name,
-          channel,
-          identifier,
-          bot,
-          department,
-          status: 'active',
-          sessionState: 'connected',
-          events: [],
-        };
-        pushConnectionEvent(created, `Conexão ${channel} criada e conectada`, 'success');
-        state.connections.unshift(created);
-        state.connTab = 'active';
-        state.connSubView = 'list';
-        toast(`Conexão "${name}" adicionada e conectada!`);
+        closeConnModal();
+        renderConnections();
+        return;
       }
 
-      closeConnModal();
-      renderConnections();
+      // Criação real no back-end (para Admin e User) com abertura imediata do QR Code para WhatsApp
+      if (!API?.getToken()) {
+        closeConnModal();
+        forceRedirectToLogin('Sua sessão expirou. Faça login novamente para criar conexões.');
+        return;
+      }
+
+      const saveBtn = $('#btnSaveAddConn');
+      saveBtn.disabled = true;
+      const apiChannel =
+        channel === 'WhatsApp' || channel === 'WhatsApp Business API'
+          ? 'WHATSAPP'
+          : channel === 'WebChat'
+            ? 'WEBCHAT'
+            : 'INSTAGRAM';
+      const isBaileysWhatsApp = channel === 'WhatsApp';
+
+      try {
+        const res = await API.createConnection({
+          name,
+          channel: apiChannel,
+          provider: isBaileysWhatsApp ? 'BAILEYS' : undefined,
+          identifier: rawIdentifier || undefined,
+          departmentName: department,
+          autoStartQr: isBaileysWhatsApp,
+        });
+        const conn = res.connection;
+        state.apiConnected = true;
+        state.connections.unshift({ ...conn, isRemote: true, events: [] });
+        state.connTab = 'active';
+        state.connSubView = 'list';
+        closeConnModal();
+        renderConnections();
+
+        if (isBaileysWhatsApp) {
+          state.waQrConnectionId = conn.id;
+          $('#waQrTitle').textContent = `Conectar WhatsApp — ${conn.name}`;
+          $('#waQrSetupStep').classList.add('hidden');
+          $('#waQrScanStep').classList.remove('hidden');
+          $('#whatsappQrModal').classList.remove('hidden');
+          updateWaQrModalState({
+            status: conn.sessionState === 'qr' ? 'QR_PENDING' : 'CONNECTING',
+            qrDataUrl: conn.qrDataUrl || null,
+            identifier: conn.identifier,
+          });
+          startWaQrPolling(conn.id);
+        } else {
+          toast(`Conexão "${name}" criada com sucesso!`);
+        }
+      } catch (err) {
+        toast(`❌ ${formatApiErrorMessage(err, 'Não foi possível criar a conexão.')}`);
+      } finally {
+        saveBtn.disabled = false;
+      }
     });
 
     // Modal Visualizar Conexão
@@ -3734,7 +4037,7 @@
         });
         startWaQrPolling(conn.id);
       } catch (err) {
-        toast(`❌ Erro ao iniciar QR Code: ${err.message}`);
+        toast(`❌ ${formatApiErrorMessage(err, 'Erro ao iniciar QR Code.')}`);
         $('#waQrSetupStep').classList.remove('hidden');
         $('#waQrScanStep').classList.add('hidden');
       }
@@ -3748,7 +4051,7 @@
         updateWaQrModalState(snap);
         startWaQrPolling(state.waQrConnectionId);
       } catch (err) {
-        toast(`Erro ao gerar novo QR: ${err.message}`);
+        toast(`❌ ${formatApiErrorMessage(err, 'Erro ao gerar novo QR Code.')}`);
       }
     });
 
@@ -4154,6 +4457,128 @@
     $('#btnThemeToggleTop').addEventListener('click', toggleTheme);
 
     // ======================================================================
+    // GESTÃO DE USUÁRIOS (ADMINISTRADOR)
+    // ======================================================================
+    $('#usersSearchInput')?.addEventListener('input', (e) => {
+      state.usersSearch = e.target.value;
+      renderUsers();
+    });
+
+    $('#usersRoleFilter')?.addEventListener('change', (e) => {
+      state.usersRoleFilter = e.target.value;
+      renderUsers();
+    });
+
+    $('#btnUsersRefresh')?.addEventListener('click', async () => {
+      const btn = $('#btnUsersRefresh');
+      btn.classList.remove('spinning');
+      void btn.offsetWidth;
+      btn.classList.add('spinning');
+      if (state.apiConnected) {
+        await loadBackendUsers();
+      } else {
+        renderUsers();
+      }
+      toast('Lista de usuários atualizada!');
+      setTimeout(() => btn.classList.remove('spinning'), 600);
+    });
+
+    $('#btnOpenNewUserModal')?.addEventListener('click', openAddUserModal);
+    $('#btnCloseAddUser')?.addEventListener('click', closeAddUserModal);
+    $('#btnCancelAddUser')?.addEventListener('click', closeAddUserModal);
+    $('#addUserModal')?.addEventListener('click', (e) => {
+      if (e.target === $('#addUserModal')) closeAddUserModal();
+    });
+
+    $('#btnToggleNewUserPwd')?.addEventListener('click', () => {
+      const inp = $('#newUserPassword');
+      inp.type = inp.type === 'password' ? 'text' : 'password';
+    });
+
+    $('#newUserPassword')?.addEventListener('input', (e) => {
+      const val = e.target.value;
+      updatePasswordRulesUI('#newUserPasswordRules', val, false);
+      const err = $('#newUserError');
+      if (err && !err.classList.contains('hidden') && evaluatePasswordStrength(val).valid) {
+        err.classList.add('hidden');
+      }
+    });
+
+    $('#btnSaveAddUser')?.addEventListener('click', async () => {
+      const name = $('#newUserName').value.trim();
+      const email = $('#newUserEmail').value.trim().toLowerCase();
+      const role = $('#newUserRole').value === 'ADMIN' ? 'ADMIN' : 'USER';
+      const password = $('#newUserPassword').value;
+      const err = $('#newUserError');
+
+      if (!name || name.length < 2) {
+        err.textContent = 'Informe o nome completo (mínimo 2 caracteres).';
+        err.classList.remove('hidden');
+        return;
+      }
+      if (!email || !email.includes('@')) {
+        err.textContent = 'Informe um e-mail válido.';
+        err.classList.remove('hidden');
+        return;
+      }
+      if (!evaluatePasswordStrength(password).valid) {
+        updatePasswordRulesUI('#newUserPasswordRules', password, true);
+        err.textContent =
+          'A senha deve ter no mínimo 8 caracteres, contendo letra maiúscula, letra minúscula, número e caractere especial.';
+        err.classList.remove('hidden');
+        return;
+      }
+
+      err.classList.add('hidden');
+
+      if (!API?.getToken()) {
+        closeAddUserModal();
+        forceRedirectToLogin('Sua sessão expirou. Faça login novamente.');
+        return;
+      }
+
+      const saveBtn = $('#btnSaveAddUser');
+      saveBtn.disabled = true;
+      try {
+        const res = await API.createUser({ name, email, password, role });
+        closeAddUserModal();
+        await loadBackendUsers();
+        toast(res.message || `Usuário "${name}" criado com sucesso!`);
+      } catch (apiErr) {
+        err.textContent = formatApiErrorMessage(apiErr, 'Não foi possível criar o usuário.');
+        err.classList.remove('hidden');
+      } finally {
+        saveBtn.disabled = false;
+      }
+    });
+
+    $('#btnCloseDeleteUser')?.addEventListener('click', closeDeleteUserModal);
+    $('#btnCancelDeleteUser')?.addEventListener('click', closeDeleteUserModal);
+    $('#deleteUserModal')?.addEventListener('click', (e) => {
+      if (e.target === $('#deleteUserModal')) closeDeleteUserModal();
+    });
+
+    $('#btnConfirmDeleteUser')?.addEventListener('click', async () => {
+      const targetId = state.deletingUserId;
+      if (!targetId) return;
+
+      if (!API?.getToken()) {
+        closeDeleteUserModal();
+        forceRedirectToLogin('Sua sessão expirou. Faça login novamente.');
+        return;
+      }
+
+      try {
+        const res = await API.deleteUser(targetId);
+        closeDeleteUserModal();
+        await loadBackendUsers();
+        toast(res.message || 'Usuário removido com sucesso!');
+      } catch (err) {
+        toast(`❌ ${formatApiErrorMessage(err, 'Erro ao remover usuário.')}`);
+      }
+    });
+
+    // ======================================================================
     // LOGIN / ESQUECI MINHA SENHA / CADASTRAR / LGPD
     // ======================================================================
     $('#btnGoForgot').addEventListener('click', () => showAuthPanel('forgot'));
@@ -4173,31 +4598,8 @@
       });
     }
 
-    function evaluatePasswordStrength(pwd) {
-      const checks = {
-        length: pwd.length >= 8,
-        upper: /[A-Z]/.test(pwd),
-        lower: /[a-z]/.test(pwd),
-        number: /[0-9]/.test(pwd),
-        special: /[^A-Za-z0-9\s]/.test(pwd),
-      };
-      const valid = Object.values(checks).every(Boolean);
-      return { checks, valid };
-    }
-
     function updateRegPasswordRulesUI(pwd, showInvalidState = false) {
-      const { checks } = evaluatePasswordStrength(pwd);
-      const hasInput = pwd.length > 0;
-      $$('#regPasswordRules .pwd-rule').forEach((item) => {
-        const rule = item.dataset.rule;
-        const ok = Boolean(checks[rule]);
-        item.classList.toggle('valid', ok);
-        item.classList.toggle('invalid', !ok && (showInvalidState || hasInput));
-        const icon = item.querySelector('.pwd-rule-icon');
-        if (icon) {
-          icon.textContent = ok ? '✓' : showInvalidState || hasInput ? '✕' : '•';
-        }
-      });
+      updatePasswordRulesUI('#regPasswordRules', pwd, showInvalidState);
     }
 
     const regPasswordInput = $('#regPassword');
@@ -4210,33 +4612,6 @@
           if (valid) err.classList.add('hidden');
         }
       });
-    }
-
-    const ADMIN_ACCOUNT = {
-      name: 'Ransay',
-      email: 'ransay@supermegavendas.com',
-      password: '@Smv2025',
-      role: 'Admin',
-    };
-
-    function getRegisteredUsers() {
-      try {
-        const saved = JSON.parse(localStorage.getItem('smv_sac_users') || '[]');
-        return [ADMIN_ACCOUNT, ...(Array.isArray(saved) ? saved : [])];
-      } catch {
-        return [ADMIN_ACCOUNT];
-      }
-    }
-
-    function saveRegisteredUser(user) {
-      try {
-        const saved = JSON.parse(localStorage.getItem('smv_sac_users') || '[]');
-        const list = Array.isArray(saved) ? saved : [];
-        list.push(user);
-        localStorage.setItem('smv_sac_users', JSON.stringify(list));
-      } catch {
-        // fallback silencioso
-      }
     }
 
     $('#loginForm').addEventListener('submit', async (e) => {
@@ -4255,46 +4630,35 @@
         err.classList.remove('hidden');
         return;
       }
-
-      // 1. Tenta autenticar no back-end real (Fastify + Supabase na porta 3333)
-      if (API) {
-        try {
-          const res = await API.login(email, pwd);
-          state.apiConnected = true;
-          state.lgpdAccepted = Boolean(res.lgpd?.accepted);
-          DATA.currentAgent.id = res.user.id;
-          err.classList.add('hidden');
-          startAuthFlow({
-            id: res.user.id,
-            name: res.user.name,
-            email: res.user.email,
-            role: res.user.role === 'ADMIN' ? 'Admin' : 'Agente',
-            subdomain: res.user.organization?.slug || 'supermegavendas',
-          });
-          return;
-        } catch (apiErr) {
-          if (apiErr.status === 401 || apiErr.status === 400) {
-            err.textContent = apiErr.message || 'E-mail ou senha inválidos.';
-            err.classList.remove('hidden');
-            return;
-          }
-          // Se o back-end estiver offline (erro de rede), segue com fallback local
-          state.apiConnected = false;
-        }
-      }
-
-      const matched = getRegisteredUsers().find(
-        (u) => u.email.toLowerCase() === email && u.password === pwd
-      );
-
-      if (!matched) {
-        err.textContent = 'E-mail ou senha inválidos. Verifique suas credenciais.';
+      if (!API) {
+        err.textContent = 'Cliente de API indisponível. Recarregue a página e tente novamente.';
         err.classList.remove('hidden');
         return;
       }
 
-      err.classList.add('hidden');
-      startAuthFlow({ name: matched.name, email: matched.email, role: matched.role || 'Agente' });
+      try {
+        const res = await API.login(email, pwd);
+        if (!res?.accessToken || !res?.user) {
+          throw new Error('Resposta de autenticação inválida do servidor.');
+        }
+        state.apiConnected = true;
+        state.lgpdAccepted = Boolean(res.lgpd?.accepted);
+        DATA.currentAgent.id = res.user.id;
+        persistAuthSession(res.accessToken, res.user, state.lgpdAccepted);
+        err.classList.add('hidden');
+        startAuthFlow({
+          id: res.user.id,
+          name: res.user.name,
+          email: res.user.email,
+          role: res.user.role,
+          subdomain: res.user.organization?.slug || 'supermegavendas',
+        });
+      } catch (apiErr) {
+        state.apiConnected = false;
+        API.setToken(null);
+        err.textContent = formatApiErrorMessage(apiErr, 'E-mail ou senha inválidos.');
+        err.classList.remove('hidden');
+      }
     });
 
     $('#forgotForm').addEventListener('submit', (e) => {
@@ -4337,44 +4701,36 @@
         err.classList.remove('hidden');
         return;
       }
-
-      // 1. Tenta cadastrar no back-end real (Fastify + Supabase na porta 3333)
-      if (API) {
-        try {
-          const res = await API.register(name, email, pwd);
-          state.apiConnected = true;
-          state.lgpdAccepted = Boolean(res.lgpd?.accepted);
-          DATA.currentAgent.id = res.user.id;
-          err.classList.add('hidden');
-          startAuthFlow({
-            id: res.user.id,
-            name: res.user.name,
-            email: res.user.email,
-            role: res.user.role === 'ADMIN' ? 'Admin' : 'Agente',
-            subdomain: res.user.organization?.slug || 'supermegavendas',
-            isNew: true,
-          });
-          return;
-        } catch (apiErr) {
-          if (apiErr.status === 400 || apiErr.status === 404 || apiErr.status === 409) {
-            err.textContent = apiErr.message || 'Não foi possível concluir o cadastro.';
-            err.classList.remove('hidden');
-            return;
-          }
-          // Se o back-end estiver offline (erro de rede), segue com fallback local
-          state.apiConnected = false;
-        }
-      }
-
-      if (getRegisteredUsers().some((u) => u.email.toLowerCase() === email)) {
-        err.textContent = 'Este e-mail já está cadastrado. Faça login para acessar.';
+      if (!API) {
+        err.textContent = 'Cliente de API indisponível. Recarregue a página e tente novamente.';
         err.classList.remove('hidden');
         return;
       }
-      err.classList.add('hidden');
-      const newUser = { name, email, password: pwd, role: 'Agente', isNew: true };
-      saveRegisteredUser(newUser);
-      startAuthFlow(newUser);
+
+      try {
+        const res = await API.register(name, email, pwd);
+        if (!res?.accessToken || !res?.user) {
+          throw new Error('Resposta de cadastro inválida do servidor.');
+        }
+        state.apiConnected = true;
+        state.lgpdAccepted = Boolean(res.lgpd?.accepted);
+        DATA.currentAgent.id = res.user.id;
+        persistAuthSession(res.accessToken, res.user, state.lgpdAccepted);
+        err.classList.add('hidden');
+        startAuthFlow({
+          id: res.user.id,
+          name: res.user.name,
+          email: res.user.email,
+          role: res.user.role,
+          subdomain: res.user.organization?.slug || 'supermegavendas',
+          isNew: true,
+        });
+      } catch (apiErr) {
+        state.apiConnected = false;
+        API.setToken(null);
+        err.textContent = formatApiErrorMessage(apiErr, 'Não foi possível concluir o cadastro.');
+        err.classList.remove('hidden');
+      }
     });
 
     // Modal LGPD
@@ -4424,19 +4780,10 @@
 
     // Logout
     $('#btnLogout').addEventListener('click', async () => {
-      if (state.apiConnected && API) {
+      if (API?.getToken()) {
         await API.logout();
       }
-      stopWaQrPolling();
-      stopFallbackSyncPolling();
-      state.authenticated = false;
-      state.apiConnected = false;
-      state.socketConnected = false;
-      state.lgpdAccepted = false;
-      $('#appShell').classList.add('hidden');
-      $('#authScreen').classList.remove('hidden');
-      showAuthPanel('login');
-      toast('Você saiu da sua conta SMV Sac.');
+      forceRedirectToLogin('Você saiu da sua conta SMV Sac.');
     });
 
     document.addEventListener('keydown', (e) => {
@@ -4456,6 +4803,8 @@
         closeImportContactsModal();
         closeManualModal();
         closeAccountModal();
+        closeAddUserModal();
+        closeDeleteUserModal();
         closeAboutModal();
         closeComposerActionModal();
         closeTransferModal();
@@ -4535,11 +4884,14 @@
 
   function completeLogin(user) {
     state.authenticated = true;
+    const normalized = normalizeUserProfile(user.role, user.email);
     state.currentUser = {
+      id: user.id || null,
       name: user.name || 'Ransay',
-      email: user.email || 'ransay@supermegavendas.com',
-      role: user.role || 'Agente',
-      subdomain: state.currentUser?.subdomain || 'supermegavendas',
+      email: user.email || PRIMARY_ADMIN_EMAIL,
+      roleCode: normalized.roleCode,
+      role: normalized.roleLabel,
+      subdomain: user.subdomain || state.currentUser?.subdomain || 'supermegavendas',
     };
     const parts = (state.currentUser.name || 'RA').trim().split(/\s+/);
     const initials = (parts[0]?.[0] || 'S') + (parts[1]?.[0] || parts[0]?.[1] || 'M');
@@ -4547,28 +4899,143 @@
     DATA.currentAgent.initials = initials.toUpperCase();
     const selfAgent = DATA.agents.find((a) => a.id === DATA.currentAgent.id);
     if (selfAgent) {
-      selfAgent.name = `${state.currentUser.name} (${state.currentUser.role === 'Admin' ? 'Admin' : 'Você'})`;
+      selfAgent.name = `${state.currentUser.name} (${normalized.roleCode === 'ADMIN' ? 'Administrador' : 'User'})`;
     }
     $('#agentAvatarInitials').textContent = DATA.currentAgent.initials;
     $('#profileMenuUserName').textContent = state.currentUser.name;
     $('#btnCopySubdomain').textContent = state.currentUser.subdomain;
     $('#aboutSubdomainVal').textContent = state.currentUser.subdomain;
+    syncRoleVisibilityUI();
 
     $('#authScreen').classList.add('hidden');
     $('#appShell').classList.remove('hidden');
     setView('conversations');
     if (state.apiConnected) {
       void bootstrapBackendSession();
+      if (isCurrentUserAdmin()) {
+        void loadBackendUsers();
+      }
     }
     toast(
       user.isNew
-        ? `Conta criada! Bem-vindo ao SMV Sac, ${user.name}!`
-        : `Bem-vindo ao SMV Sac, ${user.name}${user.role === 'Admin' ? ' (Admin)' : ''}!`
+        ? `Conta criada! Bem-vindo ao SMV Sac, ${user.name} (${normalized.roleLabel})!`
+        : `Bem-vindo ao SMV Sac, ${user.name} (${normalized.roleLabel})!`
     );
   }
 
-  bindEvents();
-  applyTheme(state.theme);
-  renderNotifications();
-  setView('conversations');
+  const SESSION_STORAGE_KEY = 'smv_sac_session';
+  const LEGACY_OFFLINE_STORAGE_KEYS = [
+    'smv_sac_users',
+    'smv_sac_offline_mode',
+    'smv_sac_token',
+    'offlineMode',
+  ];
+
+  function clearStoredAuthSession() {
+    try {
+      localStorage.removeItem(SESSION_STORAGE_KEY);
+      LEGACY_OFFLINE_STORAGE_KEYS.forEach((k) => localStorage.removeItem(k));
+    } catch {}
+    if (API) {
+      API.setToken(null);
+      API.disconnectSocket();
+    }
+  }
+
+  function persistAuthSession(accessToken, user, lgpdAccepted) {
+    if (!accessToken || typeof accessToken !== 'string') return;
+    try {
+      LEGACY_OFFLINE_STORAGE_KEYS.forEach((k) => localStorage.removeItem(k));
+      localStorage.setItem(
+        SESSION_STORAGE_KEY,
+        JSON.stringify({
+          accessToken,
+          refreshToken: API?.getRefreshToken?.() || null,
+          user,
+          lgpdAccepted: Boolean(lgpdAccepted),
+          savedAt: new Date().toISOString(),
+        })
+      );
+    } catch {}
+  }
+
+  function forceRedirectToLogin(message = '') {
+    clearStoredAuthSession();
+    stopWaQrPolling();
+    stopFallbackSyncPolling();
+    state.authenticated = false;
+    state.apiConnected = false;
+    state.socketConnected = false;
+    state.lgpdAccepted = false;
+    state.pendingUser = null;
+    $('#appShell')?.classList.add('hidden');
+    $('#authScreen')?.classList.remove('hidden');
+    showAuthPanel('login');
+    if (message) toast(message);
+  }
+
+  async function bootstrap() {
+    bindEvents();
+    applyTheme(state.theme);
+    renderNotifications();
+
+    // Remove qualquer resquício de chaves antigas de modo offline
+    try {
+      LEGACY_OFFLINE_STORAGE_KEYS.forEach((k) => localStorage.removeItem(k));
+    } catch {}
+
+    let savedSession = null;
+    try {
+      const raw = localStorage.getItem(SESSION_STORAGE_KEY);
+      if (raw) {
+        savedSession = JSON.parse(raw);
+      }
+    } catch {
+      savedSession = null;
+      clearStoredAuthSession();
+    }
+
+    // Se houver sessão salva sem accessToken válido ou marcada como offline, limpa e redireciona para o login
+    const hasValidStoredToken = Boolean(
+      savedSession &&
+        !savedSession.offlineMode &&
+        typeof savedSession.accessToken === 'string' &&
+        savedSession.accessToken.trim().length > 10
+    );
+
+    if (!hasValidStoredToken) {
+      if (savedSession) {
+        clearStoredAuthSession();
+      }
+      $('#appShell').classList.add('hidden');
+      $('#authScreen').classList.remove('hidden');
+      showAuthPanel('login');
+      return;
+    }
+
+    // Valida o accessToken salvo no back-end real (/api/v1/auth/me) antes de liberar o painel
+    try {
+      API.setToken(savedSession.accessToken, savedSession.refreshToken || null);
+      const me = await API.getMe();
+      if (!me?.user) {
+        forceRedirectToLogin();
+        return;
+      }
+      state.apiConnected = true;
+      state.lgpdAccepted = Boolean(me.lgpd?.accepted);
+      DATA.currentAgent.id = me.user.id;
+      persistAuthSession(API.getToken() || savedSession.accessToken, me.user, state.lgpdAccepted);
+      startAuthFlow({
+        id: me.user.id,
+        name: me.user.name,
+        email: me.user.email,
+        role: me.user.role,
+        subdomain: me.user.organization?.slug || 'supermegavendas',
+      });
+    } catch {
+      forceRedirectToLogin();
+    }
+  }
+
+  void bootstrap();
 })();
