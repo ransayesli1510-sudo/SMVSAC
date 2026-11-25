@@ -5616,6 +5616,10 @@
       const hadPending = Boolean(state.pendingUser);
       state.pendingUser = null;
       closeLgpdModal();
+      if (!state.authenticated) {
+        $('#authScreen')?.classList.remove('hidden');
+        showAuthPanel('login');
+      }
       if (hadPending) {
         toast('É necessário aceitar o termo LGPD para acessar o SMV Sac.');
       }
@@ -5718,7 +5722,12 @@
     }
   }
 
+  function hideBootSplash() {
+    $('#bootSplash')?.classList.add('hidden');
+  }
+
   function openLgpdModal() {
+    hideBootSplash();
     $('#lgpdAcceptRequired').checked = state.lgpdAccepted;
     $('#btnLgpdConfirm').disabled = !state.lgpdAccepted;
     $('#lgpdModal').classList.remove('hidden');
@@ -5762,6 +5771,7 @@
     $('#aboutSubdomainVal').textContent = state.currentUser.subdomain;
     syncRoleVisibilityUI();
 
+    hideBootSplash();
     $('#authScreen').classList.add('hidden');
     $('#appShell').classList.remove('hidden');
     setView('conversations');
@@ -5824,6 +5834,7 @@
     state.socketConnected = false;
     state.lgpdAccepted = false;
     state.pendingUser = null;
+    hideBootSplash();
     $('#appShell')?.classList.add('hidden');
     $('#authScreen')?.classList.remove('hidden');
     showAuthPanel('login');
@@ -5831,46 +5842,46 @@
   }
 
   async function bootstrap() {
-    bindEvents();
-    applyTheme(state.theme);
-    renderNotifications();
-
-    // Remove qualquer resquício de chaves antigas de modo offline
     try {
-      LEGACY_OFFLINE_STORAGE_KEYS.forEach((k) => localStorage.removeItem(k));
-    } catch {}
+      bindEvents();
+      applyTheme(state.theme);
+      renderNotifications();
 
-    let savedSession = null;
-    try {
-      const raw = localStorage.getItem(SESSION_STORAGE_KEY);
-      if (raw) {
-        savedSession = JSON.parse(raw);
-      }
-    } catch {
-      savedSession = null;
-      clearStoredAuthSession();
-    }
+      // Remove qualquer resquício de chaves antigas de modo offline
+      try {
+        LEGACY_OFFLINE_STORAGE_KEYS.forEach((k) => localStorage.removeItem(k));
+      } catch {}
 
-    // Se houver sessão salva sem accessToken válido ou marcada como offline, limpa e redireciona para o login
-    const hasValidStoredToken = Boolean(
-      savedSession &&
-        !savedSession.offlineMode &&
-        typeof savedSession.accessToken === 'string' &&
-        savedSession.accessToken.trim().length > 10
-    );
-
-    if (!hasValidStoredToken) {
-      if (savedSession) {
+      let savedSession = null;
+      try {
+        const raw = localStorage.getItem(SESSION_STORAGE_KEY);
+        if (raw) {
+          savedSession = JSON.parse(raw);
+        }
+      } catch {
+        savedSession = null;
         clearStoredAuthSession();
       }
-      $('#appShell').classList.add('hidden');
-      $('#authScreen').classList.remove('hidden');
-      showAuthPanel('login');
-      return;
-    }
 
-    // Valida o accessToken salvo no back-end real (/api/v1/auth/me) antes de liberar o painel
-    try {
+      // Se houver sessão salva sem accessToken válido ou marcada como offline, limpa e exibe o login imediatamente
+      const hasValidStoredToken = Boolean(
+        savedSession &&
+          !savedSession.offlineMode &&
+          typeof savedSession.accessToken === 'string' &&
+          savedSession.accessToken.trim().length > 10
+      );
+
+      if (!hasValidStoredToken) {
+        if (savedSession) {
+          clearStoredAuthSession();
+        }
+        $('#appShell')?.classList.add('hidden');
+        $('#authScreen')?.classList.remove('hidden');
+        showAuthPanel('login');
+        return;
+      }
+
+      // Mantém a tela de carregamento visível enquanto valida a sessão no back-end (/auth/me ou /auth/refresh)
       API.setToken(savedSession.accessToken, savedSession.refreshToken || null);
       const me = await API.getMe();
       if (!me?.user) {
@@ -5890,6 +5901,15 @@
       });
     } catch {
       forceRedirectToLogin();
+    } finally {
+      hideBootSplash();
+      const appHidden = $('#appShell')?.classList.contains('hidden');
+      const authHidden = $('#authScreen')?.classList.contains('hidden');
+      const lgpdHidden = $('#lgpdModal')?.classList.contains('hidden');
+      if (appHidden && authHidden && lgpdHidden) {
+        $('#authScreen')?.classList.remove('hidden');
+        showAuthPanel('login');
+      }
     }
   }
 

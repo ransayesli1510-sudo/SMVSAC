@@ -9,12 +9,42 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=20261125-03" />
+  <link rel="stylesheet" href="styles.css?v=20261125-05" />
+  <script>
+    (function () {
+      try {
+        var savedTheme = localStorage.getItem('smv_sac_theme') || 'dark';
+        document.documentElement.setAttribute('data-theme', savedTheme);
+      } catch (e) {}
+    })();
+  </script>
 </head>
 
 <body>
+  <!-- ========== TELA DE CARREGAMENTO INICIAL (EVITA FLASH DE LOGIN NO F5) ========== -->
+  <div class="boot-splash" id="bootSplash" role="status" aria-live="polite" aria-label="Carregando SMV Sac">
+    <div class="boot-splash-card">
+      <div class="brand-mark lg">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09Z"
+            fill="#09090B" />
+          <path d="M12 15l-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2Z"
+            fill="#09090B" />
+          <path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0" fill="#09090B" />
+          <path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5" fill="#09090B" />
+          <circle cx="15.5" cy="8.5" r="1.7" fill="#FACC15" />
+        </svg>
+      </div>
+      <div class="boot-splash-title">SMV <strong>Sac</strong></div>
+      <div class="boot-splash-loader">
+        <span class="boot-spinner" aria-hidden="true"></span>
+        <span>Carregando ambiente...</span>
+      </div>
+    </div>
+  </div>
+
   <!-- ========== TELA DE LOGIN / RECUPERAÇÃO / CADASTRO ========== -->
-  <div class="auth-screen" id="authScreen">
+  <div class="auth-screen hidden" id="authScreen">
     <div class="auth-topbar">
       <button class="theme-toggle-pill" id="btnThemeToggleAuth" type="button"
         title="Alternar entre tela clara e tela escura">
@@ -1953,7 +1983,7 @@
   <script src="config.js?v=20261124-08"></script>
   <script src="api.js?v=20261125-04"></script>
   <script src="data.js?v=20261124-07"></script>
-  <script src="app.js?v=20261125-04"></script>
+  <script src="app.js?v=20261125-05"></script>
 </body>
 
 </html>

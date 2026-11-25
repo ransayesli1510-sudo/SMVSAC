@@ -4521,6 +4521,71 @@ button {
   margin-bottom: 16px;
 }
 
+.boot-splash {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background:
+    radial-gradient(640px circle at 50% 0%, rgba(250, 204, 21, 0.08), transparent 65%),
+    var(--bg-app);
+  padding: 24px;
+}
+
+.boot-splash-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  text-align: center;
+}
+
+.boot-splash-title {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+}
+
+.boot-splash-title strong {
+  color: var(--yellow-400);
+}
+
+[data-theme="light"] .boot-splash-title strong {
+  color: #ca8a04;
+}
+
+.boot-splash-loader {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 2px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.boot-spinner {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--yellow-400);
+  animation: bootSpin 0.75s linear infinite;
+}
+
+[data-theme="light"] .boot-spinner {
+  border-top-color: #ca8a04;
+}
+
+@keyframes bootSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .auth-domain-hint {
   margin: 6px 0 0;
   font-size: 11.5px;
