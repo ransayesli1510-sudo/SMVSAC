@@ -77,6 +77,7 @@
     newConvDebounceTimer: null,
     contactsTabDebounceTimer: null,
     selectedConvId: DATA.conversations[0].id,
+    conversationPresences: {},
     privateMode: false,
     connTab: 'active', // active | archived
     connSubView: 'list', // list | add
@@ -610,12 +611,148 @@
     }
   }
 
+  const presenceSafetyTimers = new Map();
+  const presenceSubscribedAt = new Map();
+  const FRONTEND_PRESENCE_SAFETY_MS = 16000;
+  const FRONTEND_PRESENCE_SUB_THROTTLE_MS = 25000;
+
+  function formatPresenceLabel(status) {
+    if (status === 'recording') return 'gravando áudio...';
+    if (status === 'typing') return 'digitando...';
+    return '';
+  }
+
+  function getConversationPreviewText(c) {
+    if (!c || !Array.isArray(c.messages) || c.messages.length === 0) return '';
+    const last = [...c.messages].reverse().find((m) => m.type !== 'activity') || c.messages[c.messages.length - 1];
+    if (!last) return '';
+    const prefix = last.type === 'outgoing' ? '✓✓ ' : last.type === 'private' ? '🔒 ' : '';
+    const attLabel = last.attachment
+      ? {
+          document: `📄 ${last.attachment.name || 'Documento'}`,
+          image: '🖼️ Foto',
+          audio: `🎧 ${last.attachment.name || 'Áudio'}`,
+          contact: `👤 ${last.attachment.contactName || 'Contato'}`,
+          poll: `📊 Enquete: ${last.attachment.question || ''}`,
+          pix: `💠 Pix ${last.attachment.amount || ''}`,
+          event: `📅 ${last.attachment.title || 'Evento'}`,
+          sticker: 'Figurinha',
+        }[last.attachment.kind] || '📎 Anexo'
+      : '';
+    return `${prefix}${last.text || attLabel}`;
+  }
+
+  function renderActiveChatPresence(conv) {
+    const el = $('#chatHeaderPresence');
+    if (!el) return;
+    if (!conv) {
+      el.classList.add('hidden');
+      el.innerHTML = '';
+      return;
+    }
+    const status = state.conversationPresences[conv.id] || null;
+    const label = formatPresenceLabel(status);
+    if (!label) {
+      el.classList.add('hidden');
+      el.innerHTML = '';
+      return;
+    }
+    el.innerHTML = `<span class="presence-pulse-dot" aria-hidden="true"></span><span>${escapeHtml(label)}</span>`;
+    el.classList.remove('hidden');
+  }
+
+  function updateConversationPresenceDOM(convId) {
+    const status = state.conversationPresences[convId] || null;
+    const label = formatPresenceLabel(status);
+
+    // Atualiza prévia na lista lateral de conversas sem reconstruir toda a lista
+    const conv = state.conversations.find((c) => String(c.id) === String(convId));
+    const rowPreview = document.querySelector(`.conv-row[data-conv-id="${CSS.escape(String(convId))}"] .conv-row-preview`);
+    if (rowPreview) {
+      if (label) {
+        rowPreview.textContent = label;
+        rowPreview.classList.add('is-presence');
+      } else {
+        rowPreview.textContent = getConversationPreviewText(conv);
+        rowPreview.classList.remove('is-presence');
+      }
+    }
+
+    // Atualiza cabeçalho da conversa ativa se for a conversa selecionada
+    if (String(state.selectedConvId) === String(convId)) {
+      renderActiveChatPresence(conv);
+    }
+  }
+
+  function setConversationPresence(convId, status, timeoutMs = FRONTEND_PRESENCE_SAFETY_MS) {
+    if (!convId) return;
+    const key = String(convId);
+    const prevTimer = presenceSafetyTimers.get(key);
+    if (prevTimer) {
+      clearTimeout(prevTimer);
+      presenceSafetyTimers.delete(key);
+    }
+
+    const normalized = status === 'typing' || status === 'recording' ? status : null;
+    const prevStatus = state.conversationPresences[key] || null;
+
+    if (normalized) {
+      state.conversationPresences[key] = normalized;
+      const timer = setTimeout(() => {
+        presenceSafetyTimers.delete(key);
+        if (state.conversationPresences[key]) {
+          delete state.conversationPresences[key];
+          updateConversationPresenceDOM(key);
+        }
+      }, Math.max(3000, timeoutMs));
+      presenceSafetyTimers.set(key, timer);
+    } else {
+      delete state.conversationPresences[key];
+    }
+
+    if (prevStatus !== normalized) {
+      updateConversationPresenceDOM(key);
+    }
+  }
+
+  function clearAllConversationPresences() {
+    presenceSafetyTimers.forEach((timer) => clearTimeout(timer));
+    presenceSafetyTimers.clear();
+    presenceSubscribedAt.clear();
+    state.conversationPresences = {};
+    renderActiveChatPresence(null);
+  }
+
+  function ensurePresenceSubscribed(conv) {
+    if (!conv || !conv.isRemote || !state.apiConnected || !API?.subscribeConversationPresence) return;
+    const key = String(conv.id);
+    const now = Date.now();
+    const lastSub = presenceSubscribedAt.get(key) || 0;
+    if (now - lastSub < FRONTEND_PRESENCE_SUB_THROTTLE_MS) return;
+    presenceSubscribedAt.set(key, now);
+
+    void API.subscribeConversationPresence(conv.id)
+      .then((res) => {
+        if (res && Object.prototype.hasOwnProperty.call(res, 'presence')) {
+          setConversationPresence(conv.id, res.presence || null);
+        }
+      })
+      .catch(() => {});
+  }
+
   async function loadBackendConversations(selectFirst = false) {
     if (!state.apiConnected || !API) return;
     try {
       const { conversations } = await API.getConversations({ status: 'all', tab: 'all' });
       if (Array.isArray(conversations) && conversations.length > 0) {
         state.conversations = conversations.map(mapBackendConversation);
+        conversations.forEach((c) => {
+          if (c.presence === 'typing' || c.presence === 'recording') {
+            setConversationPresence(c.id, c.presence);
+          } else if (state.conversationPresences[c.id]) {
+            setConversationPresence(c.id, null);
+          }
+        });
         if (selectFirst || !state.conversations.some((c) => c.id === state.selectedConvId)) {
           state.selectedConvId = state.conversations[0].id;
         }
@@ -641,7 +778,11 @@
     if (inflightMessageFetches.has(conversationId)) return;
     inflightMessageFetches.add(conversationId);
     try {
-      const { messages } = await API.getMessages(conversationId);
+      const data = await API.getMessages(conversationId);
+      const messages = data?.messages;
+      if (data && Object.prototype.hasOwnProperty.call(data, 'presence')) {
+        setConversationPresence(conversationId, data.presence || null);
+      }
       if (Array.isArray(messages)) {
         const mapped = messages.map(mapBackendMessage);
         const prevSig = `${conv.messages.length}:${conv.messages[conv.messages.length - 1]?.id || ''}:${conv.messages[conv.messages.length - 1]?.deliveryStatus || ''}`;
@@ -1255,9 +1396,20 @@
         if (state.view === 'conversations') renderConversations();
         else updateGlobalCounts();
       },
+      onConversationPresence(payload) {
+        if (!payload?.conversationId) return;
+        const timeoutMs =
+          typeof payload.expiresInMs === 'number' && payload.expiresInMs > 0
+            ? payload.expiresInMs + 1000
+            : FRONTEND_PRESENCE_SAFETY_MS;
+        setConversationPresence(payload.conversationId, payload.status || null, timeoutMs);
+      },
       onMessageCreated(payload) {
         const conv = state.conversations.find((c) => c.id === payload.conversationId);
         const mappedMsg = mapBackendMessage(payload.message);
+        if (mappedMsg.type === 'incoming' && payload.conversationId) {
+          setConversationPresence(payload.conversationId, null);
+        }
         if (conv) {
           const alreadyExists = conv.messages.some(
             (m) => m.id === mappedMsg.id || (mappedMsg.externalId && m.externalId === mappedMsg.externalId)
@@ -1396,21 +1548,9 @@
     const isSearching = Boolean(state.searchQuery.trim());
 
     const renderConvCard = (c) => {
-      const last = [...c.messages].reverse().find((m) => m.type !== 'activity') || c.messages[c.messages.length - 1];
-      const prefix = last?.type === 'outgoing' ? '✓✓ ' : last?.type === 'private' ? '🔒 ' : '';
-      const attLabel = last?.attachment
-        ? {
-            document: `📄 ${last.attachment.name || 'Documento'}`,
-            image: '🖼️ Foto',
-            audio: `🎧 ${last.attachment.name || 'Áudio'}`,
-            contact: `👤 ${last.attachment.contactName || 'Contato'}`,
-            poll: `📊 Enquete: ${last.attachment.question || ''}`,
-            pix: `💠 Pix ${last.attachment.amount || ''}`,
-            event: `📅 ${last.attachment.title || 'Evento'}`,
-            sticker: 'Figurinha',
-          }[last.attachment.kind] || '📎 Anexo'
-        : '';
-      const preview = last ? `${prefix}${last.text || attLabel}` : '';
+      const presenceStatus = state.conversationPresences[c.id] || null;
+      const presenceLabel = formatPresenceLabel(presenceStatus);
+      const preview = presenceLabel || getConversationPreviewText(c);
       return `
         <div class="conv-row ${c.id === state.selectedConvId ? 'active' : ''}" data-conv-id="${c.id}">
           <div class="avatar md">
@@ -1424,7 +1564,7 @@
             </div>
             <div class="conv-ticket-tag">${escapeHtml(c.ticketNumber || '')}</div>
             <div class="conv-row-bottom">
-              <span class="conv-row-preview">${escapeHtml(preview)}</span>
+              <span class="conv-row-preview ${presenceLabel ? 'is-presence' : ''}">${escapeHtml(preview)}</span>
               ${c.unread > 0 ? `<span class="unread-dot">${c.unread}</span>` : ''}
             </div>
           </div>
@@ -1507,6 +1647,7 @@
 
         // Sincronização silenciosa em segundo plano sem travar a troca de chat
         if (selected && state.apiConnected && selected.isRemote) {
+          ensurePresenceSubscribed(selected);
           if (hadUnread) {
             void API.markConversationRead(selected.id).catch(() => {});
           }
@@ -1536,6 +1677,7 @@
     if (!conv) {
       $('#chatCustomerName').textContent = 'Selecione uma conversa';
       $('#chatHeaderPills').innerHTML = '';
+      renderActiveChatPresence(null);
       $('#chatMessages').innerHTML =
         '<div class="empty-hint" style="margin:auto;text-align:center;">Conecte um WhatsApp via QR Code em <strong>Conexões → + Adicionar</strong> ou selecione um chamado ao lado.</div>';
       return;
@@ -1546,6 +1688,8 @@
       <span class="ch-dot ${channelBadgeClass(conv.channel)}">${channelMiniGlyph(conv.channel)}</span>
     `;
     $('#chatCustomerName').textContent = conv.contact.name;
+    renderActiveChatPresence(conv);
+    if (conv.isRemote) ensurePresenceSubscribed(conv);
 
     const agObj = DATA.agents.find((a) => a.id === conv.assignee);
     const agLabel = conv.assignee === 'queue' ? 'Na Fila' : agObj ? agObj.name.replace(' (Você)', '') : 'Sem atendente';
@@ -5585,6 +5729,7 @@
     clearStoredAuthSession();
     stopWaQrPolling();
     stopFallbackSyncPolling();
+    clearAllConversationPresences();
     state.authenticated = false;
     state.apiConnected = false;
     state.socketConnected = false;

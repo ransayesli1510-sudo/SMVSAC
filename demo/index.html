@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=20261125-02" />
+  <link rel="stylesheet" href="styles.css?v=20261125-03" />
 </head>
 
 <body>
@@ -544,8 +544,11 @@
               </button>
               <div class="avatar md" id="chatAvatar"></div>
               <div class="chat-bar-identity">
-                <span class="chat-bar-name" id="chatCustomerName">Selecione uma conversa</span>
-                <div class="chat-bar-pills" id="chatHeaderPills"></div>
+                <div class="chat-bar-top-row">
+                  <span class="chat-bar-name" id="chatCustomerName">Selecione uma conversa</span>
+                  <div class="chat-bar-pills" id="chatHeaderPills"></div>
+                </div>
+                <div class="chat-bar-presence hidden" id="chatHeaderPresence" aria-live="polite"></div>
               </div>
             </div>
 
@@ -1948,9 +1951,9 @@
   <div class="toast-stack" id="toastStack"></div>
 
   <script src="config.js?v=20261124-08"></script>
-  <script src="api.js?v=20261125-02"></script>
+  <script src="api.js?v=20261125-03"></script>
   <script src="data.js?v=20261124-07"></script>
-  <script src="app.js?v=20261125-02"></script>
+  <script src="app.js?v=20261125-03"></script>
 </body>
 
 </html>

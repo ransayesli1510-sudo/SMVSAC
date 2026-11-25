@@ -1877,6 +1877,16 @@ button {
   text-overflow: ellipsis;
 }
 
+.conv-row-preview.is-presence {
+  color: var(--yellow-400);
+  font-style: italic;
+  font-weight: 600;
+}
+
+[data-theme="light"] .conv-row-preview.is-presence {
+  color: #a16207;
+}
+
 .unread-dot {
   min-width: 19px;
   height: 19px;
@@ -1925,10 +1935,53 @@ button {
 
 .chat-bar-identity {
   display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.chat-bar-top-row {
+  display: flex;
   align-items: center;
   gap: 10px;
   min-width: 0;
   flex-wrap: wrap;
+}
+
+.chat-bar-presence {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-style: italic;
+  font-weight: 600;
+  color: var(--yellow-400);
+  line-height: 1.25;
+}
+
+.chat-bar-presence .presence-pulse-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+  animation: presencePulse 1.2s ease-in-out infinite;
+}
+
+[data-theme="light"] .chat-bar-presence {
+  color: #a16207;
+}
+
+@keyframes presencePulse {
+  0%, 100% {
+    opacity: 0.35;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
 }
 
 .chat-bar-name {

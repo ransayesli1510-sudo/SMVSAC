@@ -15,7 +15,7 @@ import { ChannelType, ConnectionProvider, ConnectionStatus } from '@prisma/clien
 
 import { env } from '../../config/env.js';
 import { prisma } from '../../shared/database/prisma.js';
-import { formatPhoneFromJid, isGroupJid, isLidJid } from '../../shared/formatters/ticket.js';
+import { extractDigitsFromJid, formatPhoneFromJid, isGroupJid, isLidJid } from '../../shared/formatters/ticket.js';
 import { emitToOrganization } from '../../realtime/socket.js';
 import {
   useDatabaseAuthState,
@@ -35,6 +35,36 @@ export type RuntimeSessionStatus =
   | 'CONNECTED'
   | 'PAUSED'
   | 'DISCONNECTED';
+
+export type ContactPresenceState = 'typing' | 'recording';
+
+interface ActivePresenceEntry {
+  organizationId: string;
+  connectionId: string;
+  conversationId: string;
+  status: ContactPresenceState;
+  updatedAt: number;
+  lastEmittedAt: number;
+  timer: NodeJS.Timeout;
+}
+
+const PRESENCE_TIMEOUT_MS = 15_000; // 15s de segurança caso o WhatsApp não envie 'paused'
+const PRESENCE_REEMIT_THROTTLE_MS = 2_000;
+const PRESENCE_SUBSCRIBE_THROTTLE_MS = 30_000;
+const JID_CONV_CACHE_TTL_MS = 5 * 60_000;
+const JID_CONV_CACHE_MAX_SIZE = 2000;
+
+function normalizePresenceJid(rawJid: string | null | undefined): string | null {
+  if (!rawJid || typeof rawJid !== 'string') return null;
+  const trimmed = rawJid.trim();
+  if (!trimmed) return null;
+  // Remove sufixo de dispositivo (ex.: 5511999999999:12@s.whatsapp.net -> 5511999999999@s.whatsapp.net)
+  const atIdx = trimmed.indexOf('@');
+  if (atIdx === -1) return trimmed;
+  const userPart = trimmed.slice(0, atIdx).split(':')[0] ?? '';
+  const serverPart = trimmed.slice(atIdx);
+  return userPart ? `${userPart}${serverPart}` : null;
+}
 
 interface SessionEntry {
   connectionId: string;
@@ -57,9 +87,308 @@ const baileysLogger = pino({ level: 'silent' });
 
 class WhatsAppSessionManager {
   private readonly sessions = new Map<string, SessionEntry>();
+  private readonly activePresences = new Map<string, ActivePresenceEntry>();
+  private readonly jidToConversationCache = new Map<string, { conversationId: string; expiresAt: number }>();
+  private readonly presenceSubscribedAt = new Map<string, number>();
 
   private getSessionDir(connectionId: string): string {
     return path.join(SESSIONS_ROOT, connectionId);
+  }
+
+  getConversationPresence(conversationId: string): ContactPresenceState | null {
+    const entry = this.activePresences.get(conversationId);
+    if (!entry) return null;
+    if (Date.now() - entry.updatedAt > PRESENCE_TIMEOUT_MS) {
+      clearTimeout(entry.timer);
+      this.activePresences.delete(conversationId);
+      return null;
+    }
+    return entry.status;
+  }
+
+  private cacheConversationJid(connectionId: string, jid: string | null | undefined, conversationId: string): void {
+    const normalized = normalizePresenceJid(jid);
+    if (!normalized) return;
+    if (this.jidToConversationCache.size >= JID_CONV_CACHE_MAX_SIZE) {
+      this.jidToConversationCache.clear();
+    }
+    this.jidToConversationCache.set(`${connectionId}:${normalized}`, {
+      conversationId,
+      expiresAt: Date.now() + JID_CONV_CACHE_TTL_MS,
+    });
+  }
+
+  private async resolveConversationIdForJid(
+    organizationId: string,
+    connectionId: string,
+    rawJid: string,
+    lidToPn: Map<string, string>
+  ): Promise<string | null> {
+    const normalized = normalizePresenceJid(rawJid);
+    if (!normalized) return null;
+
+    const candidates = new Set<string>([rawJid, normalized]);
+    const mappedPn = lidToPn.get(rawJid) ?? lidToPn.get(normalized);
+    if (mappedPn) {
+      candidates.add(mappedPn);
+      const normPn = normalizePresenceJid(mappedPn);
+      if (normPn) candidates.add(normPn);
+    }
+
+    const now = Date.now();
+    for (const candidate of candidates) {
+      const cached = this.jidToConversationCache.get(`${connectionId}:${candidate}`);
+      if (cached && cached.expiresAt > now) {
+        return cached.conversationId;
+      }
+    }
+
+    const candidateList = Array.from(candidates);
+    const identity = await prisma.contactIdentity.findFirst({
+      where: {
+        connectionId,
+        externalContactId: { in: candidateList },
+      },
+      select: { contactId: true },
+    });
+
+    let contactId = identity?.contactId ?? null;
+    if (!contactId) {
+      const pnSource = mappedPn ?? (!isLidJid(normalized) && !isGroupJid(normalized) ? normalized : null);
+      const digits = (pnSource ? extractDigitsFromJid(pnSource) : null) ?? '';
+      if (digits.length >= 8) {
+        const contact = await prisma.contact.findFirst({
+          where: {
+            organizationId,
+            phoneE164: { endsWith: digits.slice(-10) },
+          },
+          select: { id: true },
+        });
+        contactId = contact?.id ?? null;
+      }
+    }
+
+    if (!contactId) return null;
+
+    const conv =
+      (await prisma.conversation.findFirst({
+        where: {
+          organizationId,
+          connectionId,
+          contactId,
+          status: { in: ['OPEN', 'PENDING'] },
+        },
+        orderBy: { lastMessageAt: 'desc' },
+        select: { id: true },
+      })) ??
+      (await prisma.conversation.findFirst({
+        where: {
+          organizationId,
+          connectionId,
+          contactId,
+        },
+        orderBy: { lastMessageAt: 'desc' },
+        select: { id: true },
+      }));
+
+    if (!conv) return null;
+
+    for (const candidate of candidateList) {
+      this.cacheConversationJid(connectionId, candidate, conv.id);
+    }
+    return conv.id;
+  }
+
+  private setConversationPresence(
+    organizationId: string,
+    connectionId: string,
+    conversationId: string,
+    status: ContactPresenceState | null
+  ): void {
+    const existing = this.activePresences.get(conversationId);
+
+    if (!status) {
+      if (!existing) return;
+      clearTimeout(existing.timer);
+      this.activePresences.delete(conversationId);
+      emitToOrganization(organizationId, 'conversation:presence', {
+        conversationId,
+        connectionId,
+        status: null,
+        updatedAt: new Date().toISOString(),
+      });
+      return;
+    }
+
+    const now = Date.now();
+    if (existing) {
+      clearTimeout(existing.timer);
+    }
+
+    const timer = setTimeout(() => {
+      this.setConversationPresence(organizationId, connectionId, conversationId, null);
+    }, PRESENCE_TIMEOUT_MS);
+
+    const shouldEmit =
+      !existing ||
+      existing.status !== status ||
+      now - existing.lastEmittedAt >= PRESENCE_REEMIT_THROTTLE_MS;
+
+    this.activePresences.set(conversationId, {
+      organizationId,
+      connectionId,
+      conversationId,
+      status,
+      updatedAt: now,
+      lastEmittedAt: shouldEmit ? now : existing?.lastEmittedAt ?? now,
+      timer,
+    });
+
+    if (shouldEmit) {
+      emitToOrganization(organizationId, 'conversation:presence', {
+        conversationId,
+        connectionId,
+        status,
+        expiresInMs: PRESENCE_TIMEOUT_MS,
+        updatedAt: new Date(now).toISOString(),
+      });
+    }
+  }
+
+  private clearAllPresencesForConnection(connectionId: string): void {
+    for (const [convId, entry] of this.activePresences.entries()) {
+      if (entry.connectionId === connectionId) {
+        this.setConversationPresence(entry.organizationId, connectionId, convId, null);
+      }
+    }
+  }
+
+  private async handlePresenceUpdate(
+    organizationId: string,
+    connectionId: string,
+    entry: SessionEntry,
+    update: { id: string; presences: Record<string, { lastKnownPresence?: string; lastSeen?: number }> }
+  ): Promise<void> {
+    const chatJid = update?.id;
+    if (!chatJid || !update?.presences || entry.paused) return;
+
+    const selfUserBare = normalizePresenceJid(entry.socket?.user?.id)?.split('@')[0] ?? null;
+    const selfLidBare = normalizePresenceJid(entry.socket?.user?.lid)?.split('@')[0] ?? null;
+
+    let nextState: ContactPresenceState | null = null;
+    let sawClearEvent = false;
+
+    for (const [participantJid, presenceData] of Object.entries(update.presences)) {
+      const pBare = normalizePresenceJid(participantJid)?.split('@')[0] ?? null;
+      if (pBare && (pBare === selfUserBare || pBare === selfLidBare)) {
+        continue;
+      }
+
+      const rawState = presenceData?.lastKnownPresence;
+      if (rawState === 'recording') {
+        nextState = 'recording';
+        break;
+      }
+      if (rawState === 'composing') {
+        nextState = 'typing';
+      } else if (rawState === 'paused' || rawState === 'available' || rawState === 'unavailable') {
+        sawClearEvent = true;
+      }
+    }
+
+    if (!nextState && !sawClearEvent) return;
+
+    const conversationId = await this.resolveConversationIdForJid(
+      organizationId,
+      connectionId,
+      chatJid,
+      entry.lidToPn
+    );
+    if (!conversationId) return;
+
+    this.setConversationPresence(organizationId, connectionId, conversationId, nextState);
+  }
+
+  private async clearPresenceForIncomingJid(
+    organizationId: string,
+    connectionId: string,
+    rawJid: string | null | undefined,
+    lidToPn: Map<string, string>
+  ): Promise<void> {
+    if (!rawJid) return;
+    const conversationId = await this.resolveConversationIdForJid(
+      organizationId,
+      connectionId,
+      rawJid,
+      lidToPn
+    );
+    if (conversationId) {
+      this.setConversationPresence(organizationId, connectionId, conversationId, null);
+    }
+  }
+
+  /**
+   * Inscreve o socket Baileys nos eventos de presença (`presenceSubscribe`) do contato da conversa.
+   * Executa com throttle (30s) e try/catch seguro para nunca impactar a abertura do chat.
+   */
+  async subscribePresenceForConversation(organizationId: string, conversationId: string): Promise<void> {
+    const now = Date.now();
+    const lastSub = this.presenceSubscribedAt.get(conversationId);
+    if (lastSub && now - lastSub < PRESENCE_SUBSCRIBE_THROTTLE_MS) {
+      return;
+    }
+
+    try {
+      const conv = await prisma.conversation.findFirst({
+        where: { id: conversationId, organizationId },
+        select: {
+          id: true,
+          connectionId: true,
+          contact: {
+            select: {
+              phoneE164: true,
+              identities: {
+                select: { connectionId: true, externalContactId: true },
+              },
+            },
+          },
+        },
+      });
+      if (!conv) return;
+
+      const entry = this.sessions.get(conv.connectionId);
+      if (!entry?.socket || entry.status !== 'CONNECTED' || entry.paused) return;
+
+      const connIdentities = conv.contact.identities.filter((i) => i.connectionId === conv.connectionId);
+      const preferredIdentity =
+        connIdentities.find((i) => i.externalContactId.endsWith('@s.whatsapp.net') || i.externalContactId.endsWith('@g.us')) ??
+        connIdentities[0];
+
+      let targetJid: string | null = preferredIdentity?.externalContactId ?? null;
+      if (targetJid && isLidJid(targetJid)) {
+        const mappedPn = entry.lidToPn.get(targetJid);
+        if (mappedPn) targetJid = mappedPn;
+      }
+      if (!targetJid && conv.contact.phoneE164) {
+        const digits = conv.contact.phoneE164.replace(/\D/g, '');
+        if (digits.length >= 8 && digits.length <= 15) {
+          targetJid = `${digits}@s.whatsapp.net`;
+        }
+      }
+
+      if (!targetJid) return;
+
+      // Pré-aquece o cache JID -> conversationId para latência zero quando o evento chegar
+      this.cacheConversationJid(conv.connectionId, targetJid, conv.id);
+      for (const ident of connIdentities) {
+        this.cacheConversationJid(conv.connectionId, ident.externalContactId, conv.id);
+      }
+
+      this.presenceSubscribedAt.set(conversationId, now);
+      await entry.socket.presenceSubscribe(targetJid);
+    } catch {
+      // Falha silenciosa: presenceSubscribe é best-effort no WhatsApp
+    }
   }
 
   getSnapshot(connectionId: string): {
@@ -267,6 +596,7 @@ class WhatsAppSessionManager {
         entry.qrDataUrl = null;
 
         if (isLoggedOut) {
+          this.clearAllPresencesForConnection(connectionId);
           entry.status = 'DISCONNECTED';
           entry.socket = null;
           await entry.authState?.clearState().catch(() => {});
@@ -412,6 +742,9 @@ class WhatsAppSessionManager {
       for (const msg of messages) {
         try {
           const jid = msg.key?.remoteJid;
+          if (jid && !msg.key?.fromMe) {
+            void this.clearPresenceForIncomingJid(organizationId, connectionId, jid, entry.lidToPn);
+          }
           let nameHint = jid ? entry.knownNames.get(jid) ?? null : null;
           const pnHint = jid ? entry.lidToPn.get(jid) ?? null : null;
           if (!nameHint && pnHint) {
@@ -450,6 +783,11 @@ class WhatsAppSessionManager {
     // Atualizações de confirmação de entrega e leitura (✓✓)
     sock.ev.on('messages.update', (updates) => {
       void handleWhatsAppStatusUpdates(organizationId, connectionId, updates);
+    });
+
+    // Presença em tempo real do contato ("digitando..." / "gravando áudio...")
+    sock.ev.on('presence.update', (update) => {
+      void this.handlePresenceUpdate(organizationId, connectionId, entry, update).catch(() => {});
     });
   }
 
@@ -540,6 +878,7 @@ class WhatsAppSessionManager {
   ): Promise<void> {
     const entry = this.sessions.get(connectionId);
     if (entry) {
+      this.clearAllPresencesForConnection(connectionId);
       entry.intentionalClose = true;
       if (entry.reconnectTimer) {
         clearTimeout(entry.reconnectTimer);

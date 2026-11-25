@@ -323,6 +323,10 @@
       return rawFetch(`/conversations/${conversationId}/read`, { method: 'POST' });
     },
 
+    subscribeConversationPresence(conversationId) {
+      return rawFetch(`/conversations/${conversationId}/presence/subscribe`, { method: 'POST' });
+    },
+
     transferConversation(conversationId, payload) {
       return rawFetch(`/conversations/${conversationId}/assign`, {
         method: 'PATCH',
@@ -404,6 +408,10 @@
 
         socket.on('conversation:updated', (payload) => {
           if (handlers.onConversationUpdated) handlers.onConversationUpdated(payload);
+        });
+
+        socket.on('conversation:presence', (payload) => {
+          if (handlers.onConversationPresence) handlers.onConversationPresence(payload);
         });
 
         socket.on('contact:avatar_updated', (payload) => {

@@ -114,7 +114,14 @@ export async function conversationsRoutes(app: FastifyInstance): Promise<void> {
 
     const cached = apiCache.getConversations(tenant.organizationId, cacheParams);
     if (cached) {
-      return reply.send({ conversations: cached });
+      const withPresence = cached.map((conv) => {
+        const row = conv as { id: string } & Record<string, unknown>;
+        return {
+          ...row,
+          presence: whatsappManager.getConversationPresence(row.id),
+        };
+      });
+      return reply.send({ conversations: withPresence });
     }
 
     const where: Record<string, unknown> = {
@@ -161,7 +168,12 @@ export async function conversationsRoutes(app: FastifyInstance): Promise<void> {
     const serialized = rows.map(formatConversationForClient);
     apiCache.setConversations(tenant.organizationId, cacheParams, serialized);
 
-    return reply.send({ conversations: serialized });
+    const withPresence = serialized.map((conv) => ({
+      ...conv,
+      presence: whatsappManager.getConversationPresence(conv.id),
+    }));
+
+    return reply.send({ conversations: withPresence });
   });
 
   // POST /api/v1/conversations — abre conversa existente (OPEN/PENDING) ou cria novo chamado para o contato
@@ -335,7 +347,7 @@ export async function conversationsRoutes(app: FastifyInstance): Promise<void> {
     return reply.send({ conversation: formatConversationForClient(row) });
   });
 
-  // POST /api/v1/conversations/:id/read — zera unreadCount
+  // POST /api/v1/conversations/:id/read — zera unreadCount e inscreve presença do contato no WhatsApp
   app.post('/:id/read', async (request, reply) => {
     const tenant = getTenantContext(request);
     const { id } = request.params as { id: string };
@@ -346,8 +358,25 @@ export async function conversationsRoutes(app: FastifyInstance): Promise<void> {
     });
 
     apiCache.invalidateOrgConversations(tenant.organizationId);
+    void whatsappManager.subscribePresenceForConversation(tenant.organizationId, id);
 
-    return reply.send({ ok: true });
+    return reply.send({
+      ok: true,
+      presence: whatsappManager.getConversationPresence(id),
+    });
+  });
+
+  // POST /api/v1/conversations/:id/presence/subscribe — assina eventos de presença (digitando/gravando) no Baileys
+  app.post('/:id/presence/subscribe', async (request, reply) => {
+    const tenant = getTenantContext(request);
+    const { id } = request.params as { id: string };
+
+    void whatsappManager.subscribePresenceForConversation(tenant.organizationId, id);
+
+    return reply.send({
+      ok: true,
+      presence: whatsappManager.getConversationPresence(id),
+    });
   });
 
   // PATCH /api/v1/conversations/:id/assign — Transferir chamado (departamento + atendente + comentário)

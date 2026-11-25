@@ -56,9 +56,15 @@ export async function messagesRoutes(app: FastifyInstance): Promise<void> {
     const tenant = getTenantContext(request);
     const { conversationId } = request.params as { conversationId: string };
 
+    // Inscreve presença (digitando/gravando) no Baileys de forma assíncrona e segura
+    void whatsappManager.subscribePresenceForConversation(tenant.organizationId, conversationId);
+
     const cached = apiCache.getMessages(tenant.organizationId, conversationId);
     if (cached) {
-      return reply.send({ messages: cached });
+      return reply.send({
+        messages: cached,
+        presence: whatsappManager.getConversationPresence(conversationId),
+      });
     }
 
     const conv = await prisma.conversation.findFirst({
@@ -157,7 +163,10 @@ export async function messagesRoutes(app: FastifyInstance): Promise<void> {
 
     apiCache.setMessages(tenant.organizationId, conversationId, messages);
 
-    return reply.send({ messages });
+    return reply.send({
+      messages,
+      presence: whatsappManager.getConversationPresence(conversationId),
+    });
   });
 
   // POST /api/v1/messages/conversation/:conversationId — envia texto ou anexo (multipart) e despacha pelo WhatsApp real
