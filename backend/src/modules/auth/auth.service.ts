@@ -1,18 +1,20 @@
 import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import type { FastifyInstance } from 'fastify';
-import { AgentAvailability, LgpdSubjectType, UserRole } from '@prisma/client';
+import { AgentAvailability, LgpdSubjectType, UserApprovalStatus, UserRole } from '@prisma/client';
 
 import { env } from '../../config/env.js';
 import { prisma } from '../../shared/database/prisma.js';
 import { AppError } from '../../shared/http/errors.js';
 import type { AuthJwtPayload, TenantContext } from '../../shared/http/authenticate.js';
-import type {
-  ForgotPasswordInput,
-  LoginInput,
-  RegisterInput,
-  ResetPasswordInput,
-  UpdateAvailabilityInput,
+import {
+  INVALID_DOMAIN_MESSAGE,
+  isAllowedCorporateEmail,
+  type ForgotPasswordInput,
+  type LoginInput,
+  type RegisterInput,
+  type ResetPasswordInput,
+  type UpdateAvailabilityInput,
 } from './auth.schemas.js';
 
 const BCRYPT_ROUNDS = 12;
@@ -85,6 +87,7 @@ function serializeUserProfile(user: {
   name: string;
   email: string;
   role: UserRole;
+  approvalStatus: UserApprovalStatus;
   availability: AgentAvailability;
   avatarUrl: string | null;
   lastSeenAt: Date | null;
@@ -98,6 +101,7 @@ function serializeUserProfile(user: {
     name: user.name,
     email: user.email,
     role: user.role,
+    approvalStatus: user.approvalStatus,
     profile: user.role === UserRole.ADMIN ? 'ADMIN' : 'USER',
     profileLabel: user.role === UserRole.ADMIN ? 'Administrador' : 'User',
     availability: user.availability,
@@ -121,12 +125,24 @@ export const authService = {
       },
     });
 
-    if (!user || !user.isActive) {
+    if (!user) {
       throw new AppError(401, 'INVALID_CREDENTIALS', 'E-mail ou senha inválidos.');
     }
 
     const passwordValid = await bcrypt.compare(input.password, user.passwordHash);
     if (!passwordValid) {
+      throw new AppError(401, 'INVALID_CREDENTIALS', 'E-mail ou senha inválidos.');
+    }
+
+    if (user.approvalStatus === UserApprovalStatus.PENDING) {
+      throw new AppError(
+        403,
+        'PENDING_APPROVAL',
+        'Seu cadastro está aguardando aprovação de um administrador.'
+      );
+    }
+
+    if (!user.isActive) {
       throw new AppError(401, 'INVALID_CREDENTIALS', 'E-mail ou senha inválidos.');
     }
 
@@ -158,14 +174,25 @@ export const authService = {
     };
   },
 
-  async register(app: FastifyInstance, input: RegisterInput) {
-    const normalizedEmail = input.email.toLowerCase();
+  async register(input: RegisterInput) {
+    const normalizedEmail = input.email.trim().toLowerCase();
+
+    if (!isAllowedCorporateEmail(normalizedEmail)) {
+      throw new AppError(400, 'INVALID_EMAIL_DOMAIN', INVALID_DOMAIN_MESSAGE);
+    }
 
     const existing = await prisma.user.findUnique({
       where: { email: normalizedEmail },
-      select: { id: true },
+      select: { id: true, approvalStatus: true },
     });
     if (existing) {
+      if (existing.approvalStatus === UserApprovalStatus.PENDING) {
+        throw new AppError(
+          409,
+          'REGISTRATION_ALREADY_PENDING',
+          'Já existe uma solicitação de cadastro pendente para este e-mail. Aguarde a aprovação de um administrador.'
+        );
+      }
       throw new AppError(409, 'EMAIL_ALREADY_EXISTS', 'Este e-mail já está cadastrado.');
     }
 
@@ -188,8 +215,10 @@ export const authService = {
         email: normalizedEmail,
         passwordHash,
         role: UserRole.AGENT,
-        availability: AgentAvailability.ONLINE,
-        lastSeenAt: new Date(),
+        approvalStatus: UserApprovalStatus.PENDING,
+        isActive: false,
+        availability: AgentAvailability.OFFLINE,
+        lastSeenAt: null,
       },
       include: {
         organization: { select: { id: true, name: true, slug: true, plan: true } },
@@ -197,15 +226,11 @@ export const authService = {
       },
     });
 
-    const tokens = issueTokenPair(app, createdUser);
-    const lgpd = await getLatestUserLgpdStatus(createdUser.organizationId, createdUser.id);
-
     return {
-      ...tokens,
-      tokenType: 'Bearer' as const,
-      expiresIn: env.JWT_EXPIRES_IN,
+      pendingApproval: true as const,
       user: serializeUserProfile(createdUser),
-      lgpd,
+      message:
+        'Solicitação de cadastro enviada com sucesso! Seu acesso será liberado assim que um administrador aprovar sua conta.',
     };
   },
 
@@ -232,6 +257,7 @@ export const authService = {
         id: decoded.sub,
         organizationId: decoded.organizationId,
         isActive: true,
+        approvalStatus: UserApprovalStatus.APPROVED,
       },
       include: {
         organization: { select: { id: true, name: true, slug: true, plan: true } },

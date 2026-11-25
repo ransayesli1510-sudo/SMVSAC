@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=20261125-01" />
+  <link rel="stylesheet" href="styles.css?v=20261125-02" />
 </head>
 
 <body>
@@ -91,7 +91,8 @@
           </div>
           <div class="form-group">
             <label for="regEmail">E-mail corporativo</label>
-            <input type="email" id="regEmail" class="auth-input" placeholder="voce@empresa.com.br" required />
+            <input type="email" id="regEmail" class="auth-input" placeholder="voce@supermegavendas.com" required />
+            <p class="auth-domain-hint">Apenas e-mails corporativos <strong>@supermegavendas.com</strong> são aceitos.</p>
           </div>
           <div class="form-group">
             <label for="regPassword">Criar senha</label>
@@ -116,8 +117,17 @@
             </ul>
           </div>
           <div class="auth-error hidden" id="registerError"></div>
-          <button type="submit" class="btn primary pill full auth-submit">Criar conta</button>
+          <button type="submit" class="btn primary pill full auth-submit" id="btnRegisterSubmit">Solicitar cadastro</button>
         </form>
+
+        <div class="auth-success-box hidden" id="registerSuccess" role="status" aria-live="polite">
+          <div class="auth-success-icon">⏳</div>
+          <h3>Solicitação enviada para aprovação</h3>
+          <p id="registerSuccessText">
+            Seu cadastro foi enviado com sucesso e aguarda aprovação de um administrador. Assim que for aprovado, você poderá acessar normalmente pela tela de login.
+          </p>
+          <button type="button" class="btn primary pill full" id="btnRegSuccessGoLogin">Ir para o login</button>
+        </div>
       </div>
 
       <!-- Opções abaixo da tela de login: Esqueci minha senha & Cadastrar -->
@@ -198,6 +208,7 @@
             <circle cx="12" cy="10" r="2.5" />
             <path d="M8.5 16.5a4.2 4.2 0 0 1 7 0" />
           </svg>
+          <span class="top-badge alert-badge hidden" id="navUsersPendingBadge">0</span>
         </button>
 
         <span class="topbar-divider"></span>
@@ -1067,6 +1078,11 @@
                 </svg>
                 <input type="text" id="usersSearchInput" placeholder="Buscar por nome ou e-mail..." />
               </div>
+              <select id="usersApprovalFilter" class="pill-filter-select" title="Filtrar por aprovação">
+                <option value="all">Aprovação: Todos</option>
+                <option value="PENDING">Aguardando aprovação</option>
+                <option value="APPROVED">Aprovados</option>
+              </select>
               <select id="usersRoleFilter" class="pill-filter-select" title="Filtrar por perfil">
                 <option value="all">Perfil: Todos</option>
                 <option value="ADMIN">Administrador</option>
@@ -1085,6 +1101,14 @@
               </button>
               <button type="button" class="btn primary pill" id="btnOpenNewUserModal">+ Novo Usuário</button>
             </div>
+          </div>
+
+          <div class="users-pending-alert hidden" id="usersPendingAlert">
+            <div class="users-pending-alert-info">
+              <span class="pending-dot"></span>
+              <span id="usersPendingAlertText">Há solicitações de auto-cadastro aguardando sua aprovação.</span>
+            </div>
+            <button type="button" class="btn secondary pill sm-action" id="btnFilterPendingUsers">Ver pendentes</button>
           </div>
 
           <div class="users-info-banner">
@@ -1271,6 +1295,55 @@
       <div class="modal-foot">
         <button type="button" class="btn secondary pill" id="btnCancelResetUserPwd">Cancelar</button>
         <button type="button" class="btn primary pill" id="btnSaveResetUserPwd">Redefinir senha</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== MODAL APROVAR CADASTRO PENDENTE (APENAS ADMINISTRADOR) ========== -->
+  <div class="modal-backdrop hidden" id="approveUserModal" role="dialog" aria-modal="true"
+    aria-labelledby="approveUserModalTitle">
+    <div class="modal-card">
+      <div class="modal-head">
+        <div>
+          <h3 id="approveUserModalTitle">Aprovar cadastro</h3>
+          <p class="modal-sub" id="approveUserSubtitle">Libere o acesso do usuário e, se desejar, já aloque-o em um setor.</p>
+        </div>
+        <button type="button" class="icon-btn" id="btnCloseApproveUser" title="Fechar">×</button>
+      </div>
+      <div class="modal-body">
+        <label for="approveUserDepartment">Setor (opcional)</label>
+        <select id="approveUserDepartment" class="field-select">
+          <option value="">Sem setor específico</option>
+        </select>
+
+        <label for="approveUserRole">Perfil de acesso</label>
+        <select id="approveUserRole" class="field-select">
+          <option value="USER" selected>User — Atende e conecta seu WhatsApp via QR Code</option>
+          <option value="ADMIN">Administrador — Insere/remove usuários e gerencia tudo</option>
+        </select>
+
+        <div class="auth-error hidden" id="approveUserError" style="margin-top:12px;margin-bottom:0;"></div>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn secondary pill" id="btnCancelApproveUser">Cancelar</button>
+        <button type="button" class="btn primary pill" id="btnConfirmApproveUser">Aprovar e liberar acesso</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== MODAL RECUSAR CADASTRO PENDENTE (APENAS ADMINISTRADOR) ========== -->
+  <div class="modal-backdrop hidden" id="rejectUserModal" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3>Recusar solicitação de cadastro</h3>
+        <button type="button" class="icon-btn" id="btnCloseRejectUser">×</button>
+      </div>
+      <div class="modal-body">
+        <p class="delete-confirm-text" id="rejectUserMessage"></p>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn secondary pill" id="btnCancelRejectUser">Cancelar</button>
+        <button type="button" class="btn danger pill" id="btnConfirmRejectUser">Recusar solicitação</button>
       </div>
     </div>
   </div>
@@ -1875,9 +1948,9 @@
   <div class="toast-stack" id="toastStack"></div>
 
   <script src="config.js?v=20261124-08"></script>
-  <script src="api.js?v=20261125-01"></script>
+  <script src="api.js?v=20261125-02"></script>
   <script src="data.js?v=20261124-07"></script>
-  <script src="app.js?v=20261125-01"></script>
+  <script src="app.js?v=20261125-02"></script>
 </body>
 
 </html>

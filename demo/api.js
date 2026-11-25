@@ -145,8 +145,10 @@
         method: 'POST',
         body: JSON.stringify({ name, email, password }),
       });
-      accessToken = data.accessToken;
-      refreshToken = data.refreshToken || null;
+      if (data?.accessToken) {
+        accessToken = data.accessToken;
+        refreshToken = data.refreshToken || null;
+      }
       return data;
     },
 
@@ -207,6 +209,19 @@
       return rawFetch(`/users/${userId}/role`, {
         method: 'PATCH',
         body: JSON.stringify({ role }),
+      });
+    },
+
+    approveUser(userId, payload = {}) {
+      return rawFetch(`/users/${userId}/approve`, {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      });
+    },
+
+    rejectUser(userId) {
+      return rawFetch(`/users/${userId}/reject`, {
+        method: 'POST',
       });
     },
 

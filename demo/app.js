@@ -50,9 +50,12 @@
     usersSearch: '',
     usersRoleFilter: 'all',
     usersDeptFilter: 'all',
+    usersApprovalFilter: 'all',
     openUserMenuId: null,
     editingUserId: null,
     resetPwdUserId: null,
+    approvingUserId: null,
+    rejectingUserId: null,
     deletingUserId: null,
     theme: localStorage.getItem('smv_sac_theme') || 'dark',
     view: 'conversations', // conversations | connections | contacts | reports | ai
@@ -2679,11 +2682,57 @@
     }
   }
 
+  const INVALID_CORPORATE_DOMAIN_MSG =
+    'Apenas e-mails com o domínio @supermegavendas.com são permitidos para cadastro.';
+
+  function isAllowedCorporateEmail(rawEmail) {
+    const normalized = String(rawEmail || '').trim().toLowerCase();
+    const parts = normalized.split('@');
+    if (parts.length !== 2) return false;
+    return parts[0].length > 0 && parts[1] === 'supermegavendas.com';
+  }
+
+  function syncPendingUsersIndicators() {
+    const pendingCount = state.usersList.filter(
+      (u) => u.approvalStatus === 'PENDING' || u.isPendingApproval
+    ).length;
+
+    const navBadge = $('#navUsersPendingBadge');
+    if (navBadge) {
+      navBadge.textContent = pendingCount;
+      navBadge.classList.toggle('hidden', pendingCount === 0);
+    }
+
+    const alertBox = $('#usersPendingAlert');
+    const alertText = $('#usersPendingAlertText');
+    if (alertBox && alertText) {
+      if (pendingCount > 0) {
+        alertText.innerHTML =
+          pendingCount === 1
+            ? '<strong>1 solicitação de cadastro</strong> aguardando aprovação do administrador.'
+            : `<strong>${pendingCount} solicitações de cadastro</strong> aguardando aprovação do administrador.`;
+        alertBox.classList.remove('hidden');
+      } else {
+        alertBox.classList.add('hidden');
+      }
+    }
+
+    const approvalSelect = $('#usersApprovalFilter');
+    if (approvalSelect) {
+      const pendingOpt = approvalSelect.querySelector('option[value="PENDING"]');
+      if (pendingOpt) {
+        pendingOpt.textContent =
+          pendingCount > 0 ? `Aguardando aprovação (${pendingCount})` : 'Aguardando aprovação';
+      }
+    }
+  }
+
   async function loadBackendUsers() {
     if (!API?.getToken() || !isCurrentUserAdmin()) return;
     try {
       const data = await API.getUsers();
       state.usersList = Array.isArray(data.users) ? data.users : [];
+      syncPendingUsersIndicators();
       if (state.view === 'users') renderUsers();
     } catch (err) {
       console.warn('[API] Falha ao carregar usuários:', err);
@@ -2701,13 +2750,18 @@
       badge.classList.toggle('hidden', source.length === 0);
     }
 
+    syncPendingUsersIndicators();
     syncUsersDeptFilterOptions();
 
     const q = (state.usersSearch || '').trim().toLowerCase();
     const roleFilter = state.usersRoleFilter || 'all';
     const deptFilter = state.usersDeptFilter || 'all';
+    const approvalFilter = state.usersApprovalFilter || 'all';
 
     const filtered = source.filter((u) => {
+      const isPending = u.approvalStatus === 'PENDING' || Boolean(u.isPendingApproval);
+      if (approvalFilter === 'PENDING' && !isPending) return false;
+      if (approvalFilter === 'APPROVED' && isPending) return false;
       if (roleFilter !== 'all' && u.role !== roleFilter) return false;
       if (deptFilter === '__none__' && u.department) return false;
       if (deptFilter !== 'all' && deptFilter !== '__none__' && (u.department || '') !== deptFilter) return false;
@@ -2716,7 +2770,8 @@
           (u.name || '').toLowerCase().includes(q) ||
           (u.email || '').toLowerCase().includes(q) ||
           (u.department || '').toLowerCase().includes(q) ||
-          (u.profileLabel || '').toLowerCase().includes(q);
+          (u.profileLabel || '').toLowerCase().includes(q) ||
+          (isPending && 'aguardando aprovação pendente'.includes(q));
         if (!match) return false;
       }
       return true;
@@ -2736,6 +2791,7 @@
     tbody.innerHTML = filtered
       .map((u) => {
         const isAdmin = u.role === 'ADMIN';
+        const isPending = u.approvalStatus === 'PENDING' || Boolean(u.isPendingApproval);
         const isPrimary = Boolean(u.isPrimaryAdmin) || String(u.email || '').toLowerCase() === PRIMARY_ADMIN_EMAIL;
         const isSelf =
           (state.currentUser.id && u.id === state.currentUser.id) ||
@@ -2743,18 +2799,21 @@
         const parts = (u.name || 'US').trim().split(/\s+/);
         const initials = ((parts[0]?.[0] || 'U') + (parts[1]?.[0] || parts[0]?.[1] || 'S')).toUpperCase();
         const waCount = u.whatsappConnectionsCount || 0;
-        const waSummary =
-          waCount > 0
+        const waSummary = isPending
+          ? 'Acesso bloqueado'
+          : waCount > 0
             ? `${waCount} WhatsApp${waCount > 1 ? 's' : ''}`
             : 'Pronto para parear QR';
-        const statusLabel =
-          u.availability === 'ONLINE'
+        const statusLabel = isPending
+          ? 'Aguardando aprovação'
+          : u.availability === 'ONLINE'
             ? 'Online'
             : u.availability === 'BUSY'
               ? 'Ocupado'
               : 'Offline';
-        const statusCls =
-          u.availability === 'ONLINE'
+        const statusCls = isPending
+          ? 'paused'
+          : u.availability === 'ONLINE'
             ? ''
             : u.availability === 'BUSY'
               ? 'paused'
@@ -2767,13 +2826,14 @@
           : `<span class="sector-pill empty">Sem setor</span>`;
 
         return `
-          <tr class="user-row ${isMenuOpen ? 'menu-open' : ''}">
+          <tr class="user-row ${isPending ? 'is-pending' : ''} ${isMenuOpen ? 'menu-open' : ''}">
             <td>
               <div style="display:flex;align-items:center;gap:10px;">
                 <div class="avatar xs ${isAdmin ? 'yellow-avatar' : ''}">${escapeHtml(initials)}</div>
                 <div>
-                  <div style="font-weight:600;display:flex;align-items:center;flex-wrap:wrap;">
+                  <div style="font-weight:600;display:flex;align-items:center;flex-wrap:wrap;gap:4px;">
                     <span>${escapeHtml(u.name)}</span>
+                    ${isPending ? '<span class="pending-approval-pill">⏳ Aguardando aprovação</span>' : ''}
                     ${isPrimary ? '<span class="role-pill primary-badge">Admin principal</span>' : ''}
                     ${isSelf && !isPrimary ? '<span class="role-pill primary-badge">Você</span>' : ''}
                   </div>
@@ -2795,6 +2855,18 @@
             </td>
             <td style="text-align:right;">
               <div class="user-actions-cell">
+                ${
+                  isPending
+                    ? `
+                      <button type="button" class="btn approve-outline pill sm-action" data-quick-approve-user="${escapeHtml(u.id)}" title="Aprovar acesso deste usuário">
+                        ✓ Aceitar
+                      </button>
+                      <button type="button" class="btn danger-outline pill sm-action" data-quick-reject-user="${escapeHtml(u.id)}" title="Recusar solicitação de cadastro">
+                        Recusar
+                      </button>
+                    `
+                    : ''
+                }
                 <div class="user-menu-wrap">
                   <button
                     type="button"
@@ -2812,6 +2884,21 @@
                     </svg>
                   </button>
                   <div class="conn-menu-dropdown user-menu-dropdown ${isMenuOpen ? '' : 'hidden'}" role="menu">
+                    ${
+                      isPending
+                        ? `
+                          <button type="button" class="conn-menu-item success" data-user-action="approve" data-user-id="${escapeHtml(u.id)}" role="menuitem">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                            <span>Aceitar (Aprovar)</span>
+                          </button>
+                          <button type="button" class="conn-menu-item danger" data-user-action="reject" data-user-id="${escapeHtml(u.id)}" role="menuitem">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                            <span>Recusar solicitação</span>
+                          </button>
+                          <div class="conn-menu-divider"></div>
+                        `
+                        : ''
+                    }
                     <button type="button" class="conn-menu-item" data-user-action="edit" data-user-id="${escapeHtml(u.id)}" role="menuitem">
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
                       <span>Editar usuário</span>
@@ -2821,7 +2908,7 @@
                       <span>Redefinir senha</span>
                     </button>
                     ${
-                      canMutate
+                      canMutate && !isPending
                         ? `
                           <button type="button" class="conn-menu-item" data-user-action="toggle-role" data-user-id="${escapeHtml(u.id)}" data-next-role="${isAdmin ? 'USER' : 'ADMIN'}" role="menuitem">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
@@ -2844,6 +2931,22 @@
       })
       .join('');
 
+    $$('[data-quick-approve-user]').forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const target = source.find((x) => x.id === btn.dataset.quickApproveUser);
+        if (target) openApproveUserModal(target);
+      };
+    });
+
+    $$('[data-quick-reject-user]').forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const target = source.find((x) => x.id === btn.dataset.quickRejectUser);
+        if (target) openRejectUserModal(target);
+      };
+    });
+
     $$('[data-user-menu-toggle]').forEach((btn) => {
       btn.onclick = (e) => {
         e.stopPropagation();
@@ -2862,6 +2965,16 @@
         state.openUserMenuId = null;
         renderUsers();
         if (!target) return;
+
+        if (action === 'approve') {
+          openApproveUserModal(target);
+          return;
+        }
+
+        if (action === 'reject') {
+          openRejectUserModal(target);
+          return;
+        }
 
         if (action === 'edit') {
           openEditUserModal(target);
@@ -2988,6 +3101,33 @@
   function closeResetUserPasswordModal() {
     state.resetPwdUserId = null;
     $('#resetUserPasswordModal')?.classList.add('hidden');
+  }
+
+  function openApproveUserModal(user) {
+    if (!isCurrentUserAdmin() || !user) return;
+    state.approvingUserId = user.id;
+    $('#approveUserSubtitle').textContent = `Aprovar solicitação de ${user.name} (${user.email}) e liberar acesso ao SMV Sac.`;
+    populateUserDepartmentSelect($('#approveUserDepartment'), user.departmentId || '', user.department || '');
+    $('#approveUserRole').value = user.role === 'ADMIN' ? 'ADMIN' : 'USER';
+    $('#approveUserError').classList.add('hidden');
+    $('#approveUserModal').classList.remove('hidden');
+  }
+
+  function closeApproveUserModal() {
+    state.approvingUserId = null;
+    $('#approveUserModal')?.classList.add('hidden');
+  }
+
+  function openRejectUserModal(user) {
+    if (!isCurrentUserAdmin() || !user) return;
+    state.rejectingUserId = user.id;
+    $('#rejectUserMessage').innerHTML = `Tem certeza que deseja recusar e excluir a solicitação de cadastro de <strong>${escapeHtml(user.name)}</strong> (${escapeHtml(user.email)})? O solicitante não terá acesso ao sistema.`;
+    $('#rejectUserModal').classList.remove('hidden');
+  }
+
+  function closeRejectUserModal() {
+    state.rejectingUserId = null;
+    $('#rejectUserModal')?.classList.add('hidden');
   }
 
   function closeDeleteUserModal() {
@@ -4676,6 +4816,18 @@
       renderUsers();
     });
 
+    $('#usersApprovalFilter')?.addEventListener('change', (e) => {
+      state.usersApprovalFilter = e.target.value;
+      renderUsers();
+    });
+
+    $('#btnFilterPendingUsers')?.addEventListener('click', () => {
+      state.usersApprovalFilter = 'PENDING';
+      const sel = $('#usersApprovalFilter');
+      if (sel) sel.value = 'PENDING';
+      renderUsers();
+    });
+
     $('#usersRoleFilter')?.addEventListener('change', (e) => {
       state.usersRoleFilter = e.target.value;
       renderUsers();
@@ -4912,6 +5064,74 @@
       }
     });
 
+    // Modal Aprovar Cadastro Pendente
+    $('#btnCloseApproveUser')?.addEventListener('click', closeApproveUserModal);
+    $('#btnCancelApproveUser')?.addEventListener('click', closeApproveUserModal);
+    $('#approveUserModal')?.addEventListener('click', (e) => {
+      if (e.target === $('#approveUserModal')) closeApproveUserModal();
+    });
+
+    $('#btnConfirmApproveUser')?.addEventListener('click', async () => {
+      const targetId = state.approvingUserId;
+      if (!targetId) return;
+
+      const { departmentId, departmentName } = readSelectedDepartmentPayload($('#approveUserDepartment'));
+      const role = $('#approveUserRole').value === 'ADMIN' ? 'ADMIN' : 'USER';
+      const err = $('#approveUserError');
+      err.classList.add('hidden');
+
+      if (!API?.getToken()) {
+        closeApproveUserModal();
+        forceRedirectToLogin('Sua sessão expirou. Faça login novamente.');
+        return;
+      }
+
+      const btn = $('#btnConfirmApproveUser');
+      btn.disabled = true;
+      try {
+        const res = await API.approveUser(targetId, { departmentId, departmentName, role });
+        closeApproveUserModal();
+        await loadBackendUsers();
+        toast(res.message || 'Cadastro aprovado com sucesso!');
+      } catch (apiErr) {
+        err.textContent = formatApiErrorMessage(apiErr, 'Não foi possível aprovar o cadastro.');
+        err.classList.remove('hidden');
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    // Modal Recusar Cadastro Pendente
+    $('#btnCloseRejectUser')?.addEventListener('click', closeRejectUserModal);
+    $('#btnCancelRejectUser')?.addEventListener('click', closeRejectUserModal);
+    $('#rejectUserModal')?.addEventListener('click', (e) => {
+      if (e.target === $('#rejectUserModal')) closeRejectUserModal();
+    });
+
+    $('#btnConfirmRejectUser')?.addEventListener('click', async () => {
+      const targetId = state.rejectingUserId;
+      if (!targetId) return;
+
+      if (!API?.getToken()) {
+        closeRejectUserModal();
+        forceRedirectToLogin('Sua sessão expirou. Faça login novamente.');
+        return;
+      }
+
+      const btn = $('#btnConfirmRejectUser');
+      btn.disabled = true;
+      try {
+        const res = await API.rejectUser(targetId);
+        closeRejectUserModal();
+        await loadBackendUsers();
+        toast(res.message || 'Solicitação de cadastro recusada.');
+      } catch (apiErr) {
+        toast(`❌ ${formatApiErrorMessage(apiErr, 'Erro ao recusar solicitação.')}`);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
     $('#btnCloseDeleteUser')?.addEventListener('click', closeDeleteUserModal);
     $('#btnCancelDeleteUser')?.addEventListener('click', closeDeleteUserModal);
     $('#deleteUserModal')?.addEventListener('click', (e) => {
@@ -4944,6 +5164,14 @@
     $('#btnGoForgot').addEventListener('click', () => showAuthPanel('forgot'));
     $('#btnGoRegister').addEventListener('click', () => showAuthPanel('register'));
     $('#btnBackToLogin').addEventListener('click', () => showAuthPanel('login'));
+    $('#btnRegSuccessGoLogin')?.addEventListener('click', () => showAuthPanel('login'));
+
+    $('#regEmail')?.addEventListener('input', (e) => {
+      const err = $('#registerError');
+      if (err && !err.classList.contains('hidden') && isAllowedCorporateEmail(e.target.value)) {
+        err.classList.add('hidden');
+      }
+    });
 
     $('#btnToggleLoginPwd').addEventListener('click', () => {
       const inp = $('#loginPassword');
@@ -5053,6 +5281,11 @@
         err.classList.remove('hidden');
         return;
       }
+      if (!isAllowedCorporateEmail(email)) {
+        err.textContent = INVALID_CORPORATE_DOMAIN_MSG;
+        err.classList.remove('hidden');
+        return;
+      }
       const pwdEval = evaluatePasswordStrength(pwd);
       if (!pwdEval.valid) {
         updateRegPasswordRulesUI(pwd, true);
@@ -5067,16 +5300,33 @@
         return;
       }
 
+      const submitBtn = $('#btnRegisterSubmit');
+      if (submitBtn) submitBtn.disabled = true;
+      err.classList.add('hidden');
+
       try {
         const res = await API.register(name, email, pwd);
-        if (!res?.accessToken || !res?.user) {
-          throw new Error('Resposta de cadastro inválida do servidor.');
+        if (res?.pendingApproval || !res?.accessToken) {
+          $('#regName').value = '';
+          $('#regEmail').value = '';
+          $('#regPassword').value = '';
+          updateRegPasswordRulesUI('', false);
+          $('#registerForm').classList.add('hidden');
+          const successText = $('#registerSuccessText');
+          if (successText) {
+            successText.textContent =
+              res?.message ||
+              'Solicitação de cadastro enviada com sucesso! Seu acesso será liberado assim que um administrador aprovar sua conta.';
+          }
+          $('#registerSuccess')?.classList.remove('hidden');
+          toast('Solicitação enviada! Aguarde a aprovação de um administrador.');
+          return;
         }
+
         state.apiConnected = true;
         state.lgpdAccepted = Boolean(res.lgpd?.accepted);
         DATA.currentAgent.id = res.user.id;
         persistAuthSession(res.accessToken, res.user, state.lgpdAccepted);
-        err.classList.add('hidden');
         startAuthFlow({
           id: res.user.id,
           name: res.user.name,
@@ -5090,6 +5340,8 @@
         API.setToken(null);
         err.textContent = formatApiErrorMessage(apiErr, 'Não foi possível concluir o cadastro.');
         err.classList.remove('hidden');
+      } finally {
+        if (submitBtn) submitBtn.disabled = false;
       }
     });
 
@@ -5166,6 +5418,8 @@
         closeAddUserModal();
         closeEditUserModal();
         closeResetUserPasswordModal();
+        closeApproveUserModal();
+        closeRejectUserModal();
         closeDeleteUserModal();
         closeAboutModal();
         closeComposerActionModal();
@@ -5219,13 +5473,15 @@
     $('#loginError').classList.add('hidden');
     $('#forgotError').classList.add('hidden');
     $('#registerError').classList.add('hidden');
+    $('#registerForm')?.classList.remove('hidden');
+    $('#registerSuccess')?.classList.add('hidden');
 
     if (panel === 'login') {
       $('#authSubtitle').textContent = 'Acesse sua conta para gerenciar seus atendimentos';
     } else if (panel === 'forgot') {
       $('#authSubtitle').textContent = 'Recuperação de acesso por e-mail';
     } else {
-      $('#authSubtitle').textContent = 'Crie sua conta no SMV Sac em segundos';
+      $('#authSubtitle').textContent = 'Solicite seu acesso corporativo (@supermegavendas.com)';
     }
   }
 

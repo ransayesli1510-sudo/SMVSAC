@@ -7,6 +7,7 @@ import {
   MessageDirection,
   MessageSenderType,
   MessageVisibility,
+  UserApprovalStatus,
 } from '@prisma/client';
 import { z } from 'zod';
 
@@ -63,7 +64,11 @@ export async function conversationsRoutes(app: FastifyInstance): Promise<void> {
         select: { id: true, name: true },
       }),
       prisma.user.findMany({
-        where: { organizationId: tenant.organizationId, isActive: true },
+        where: {
+          organizationId: tenant.organizationId,
+          isActive: true,
+          approvalStatus: UserApprovalStatus.APPROVED,
+        },
         orderBy: { name: 'asc' },
         select: { id: true, name: true, email: true, role: true, availability: true },
       }),

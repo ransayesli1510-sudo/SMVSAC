@@ -24,6 +24,11 @@ enum UserRole {
   AGENT
 }
 
+enum UserApprovalStatus {
+  APPROVED
+  PENDING
+}
+
 enum AgentAvailability {
   ONLINE
   BUSY
@@ -155,8 +160,9 @@ model User {
   name           String
   email          String            @unique
   passwordHash   String            @map("password_hash")
-  role           UserRole          @default(AGENT)
-  availability   AgentAvailability @default(OFFLINE)
+  role           UserRole           @default(AGENT)
+  approvalStatus UserApprovalStatus @default(APPROVED) @map("approval_status")
+  availability   AgentAvailability  @default(OFFLINE)
   avatarBucket   String?           @map("avatar_bucket")
   avatarPath     String?           @map("avatar_path") // Caminho no Supabase Storage
   avatarUrl      String?           @map("avatar_url")

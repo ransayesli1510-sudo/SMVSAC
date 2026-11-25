@@ -45,11 +45,11 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     return reply.status(200).send(result);
   });
 
-  // POST /api/v1/auth/register
+  // POST /api/v1/auth/register — auto-cadastro corporativo (aguarda aprovação do Administrador)
   app.post('/register', async (request, reply) => {
     const input = registerSchema.parse(request.body);
-    const result = await authService.register(app, input);
-    setRefreshCookie(reply, result.refreshToken);
+    const result = await authService.register(input);
+    clearRefreshCookie(reply);
     return reply.status(201).send(result);
   });
 

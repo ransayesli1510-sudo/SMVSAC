@@ -1,5 +1,17 @@
 import { z } from 'zod';
 
+export const ALLOWED_REGISTER_DOMAIN = '@supermegavendas.com';
+export const INVALID_DOMAIN_MESSAGE =
+  'Apenas e-mails com o domínio @supermegavendas.com são permitidos para cadastro.';
+
+export function isAllowedCorporateEmail(rawEmail: string): boolean {
+  const normalized = rawEmail.trim().toLowerCase();
+  const parts = normalized.split('@');
+  if (parts.length !== 2) return false;
+  const [localPart, domain] = parts;
+  return Boolean(localPart && localPart.length > 0 && domain === 'supermegavendas.com');
+}
+
 export const strongPasswordSchema = z
   .string()
   .min(8, 'A senha deve ter no mínimo 8 caracteres.')
@@ -16,7 +28,11 @@ export const loginSchema = z.object({
 
 export const registerSchema = z.object({
   name: z.string().trim().min(2, 'O nome deve ter pelo menos 2 caracteres.').max(120),
-  email: z.string().trim().email('Informe um e-mail válido.'),
+  email: z
+    .string()
+    .trim()
+    .email('Informe um e-mail válido.')
+    .refine(isAllowedCorporateEmail, INVALID_DOMAIN_MESSAGE),
   password: strongPasswordSchema,
   organizationSlug: z.string().trim().min(2).max(80).optional(),
 });

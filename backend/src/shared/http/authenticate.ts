@@ -1,5 +1,5 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
-import type { UserRole } from '@prisma/client';
+import { UserApprovalStatus, type UserRole } from '@prisma/client';
 import { prisma } from '../database/prisma.js';
 import { AppError } from './errors.js';
 
@@ -82,6 +82,7 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
       id: payload.sub,
       organizationId: payload.organizationId,
       isActive: true,
+      approvalStatus: UserApprovalStatus.APPROVED,
     },
     select: {
       id: true,

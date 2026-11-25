@@ -1,6 +1,12 @@
 import bcrypt from 'bcryptjs';
 import type { FastifyInstance } from 'fastify';
-import { AgentAvailability, ChannelType, ConnectionStatus, UserRole } from '@prisma/client';
+import {
+  AgentAvailability,
+  ChannelType,
+  ConnectionStatus,
+  UserApprovalStatus,
+  UserRole,
+} from '@prisma/client';
 import { z } from 'zod';
 
 import { prisma } from '../../shared/database/prisma.js';
@@ -41,6 +47,14 @@ export const updateUserRoleSchema = z.object({
   role: z.enum(['ADMIN', 'USER']),
 });
 
+export const approveUserSchema = z
+  .object({
+    departmentId: z.string().uuid('Setor inválido.').optional().nullable().or(z.literal('')),
+    departmentName: z.string().trim().max(120).optional().nullable(),
+    role: z.enum(['ADMIN', 'USER']).optional(),
+  })
+  .optional();
+
 export function toPrismaUserRole(profile: 'ADMIN' | 'USER'): UserRole {
   return profile === 'ADMIN' ? UserRole.ADMIN : UserRole.AGENT;
 }
@@ -58,6 +72,7 @@ const USER_ROW_SELECT = {
   name: true,
   email: true,
   role: true,
+  approvalStatus: true,
   availability: true,
   isActive: true,
   lastSeenAt: true,
@@ -154,6 +169,7 @@ function serializeUserRow(
     name: string;
     email: string;
     role: UserRole;
+    approvalStatus: UserApprovalStatus;
     availability: AgentAvailability;
     isActive: boolean;
     lastSeenAt: Date | null;
@@ -166,6 +182,7 @@ function serializeUserRow(
   const ownedConns = connectionsByOwner.get(user.id) ?? [];
   const departments = (user.departments ?? []).map((du) => du.department);
   const primaryDepartment = departments[0] ?? null;
+  const isPendingApproval = user.approvalStatus === UserApprovalStatus.PENDING;
 
   return {
     id: user.id,
@@ -174,6 +191,8 @@ function serializeUserRow(
     role: toProfileCode(user.role),
     dbRole: user.role,
     profileLabel: toProfileLabel(user.role),
+    approvalStatus: user.approvalStatus,
+    isPendingApproval,
     departmentId: primaryDepartment?.id ?? null,
     department: primaryDepartment?.name ?? null,
     departments,
@@ -204,12 +223,23 @@ export async function usersRoutes(app: FastifyInstance): Promise<void> {
       getWhatsAppConnectionsByOwner(tenant.organizationId),
     ]);
 
+    const sortedUsers = [...users].sort((a, b) => {
+      const aPending = a.approvalStatus === UserApprovalStatus.PENDING ? 0 : 1;
+      const bPending = b.approvalStatus === UserApprovalStatus.PENDING ? 0 : 1;
+      if (aPending !== bPending) return aPending - bPending;
+      if (aPending === 0) return b.createdAt.getTime() - a.createdAt.getTime();
+      return a.createdAt.getTime() - b.createdAt.getTime();
+    });
+
+    const pendingCount = sortedUsers.filter((u) => u.approvalStatus === UserApprovalStatus.PENDING).length;
+
     return reply.send({
-      users: users.map((u) => serializeUserRow(u, connectionsByOwner)),
+      users: sortedUsers.map((u) => serializeUserRow(u, connectionsByOwner)),
+      pendingCount,
     });
   });
 
-  // POST /api/v1/users — insere novo usuário (Administrador ou User) com alocação opcional de setor
+  // POST /api/v1/users — insere novo usuário já aprovado (Administrador ou User) com alocação opcional de setor
   app.post('/', async (request, reply) => {
     const tenant = getTenantContext(request);
     const input = createUserSchema.parse(request.body);
@@ -237,6 +267,7 @@ export async function usersRoutes(app: FastifyInstance): Promise<void> {
         email: normalizedEmail,
         passwordHash,
         role: toPrismaUserRole(input.role),
+        approvalStatus: UserApprovalStatus.APPROVED,
         availability: AgentAvailability.OFFLINE,
         isActive: true,
         ...(resolvedDepartmentId
@@ -434,6 +465,100 @@ export async function usersRoutes(app: FastifyInstance): Promise<void> {
     return reply.send({
       user: serializeUserRow(updated, connectionsByOwner),
       message: `Perfil de "${updated.name}" atualizado para ${toProfileLabel(updated.role)}.`,
+    });
+  });
+
+  // PATCH /api/v1/users/:id/approve — aprova cadastro pendente e libera acesso (com setor/perfil opcionais)
+  app.patch('/:id/approve', async (request, reply) => {
+    const tenant = getTenantContext(request);
+    const { id } = request.params as { id: string };
+    const input = approveUserSchema.parse(request.body) ?? {};
+
+    const target = await prisma.user.findFirst({
+      where: { id, organizationId: tenant.organizationId },
+      select: { id: true, name: true, email: true, role: true, approvalStatus: true },
+    });
+
+    if (!target) {
+      throw new AppError(404, 'USER_NOT_FOUND', 'Usuário não encontrado nesta organização.');
+    }
+
+    const shouldUpdateDepartment = input.departmentId !== undefined || input.departmentName !== undefined;
+    const resolvedDepartmentId = shouldUpdateDepartment
+      ? await resolveDepartmentId(tenant.organizationId, input.departmentId, input.departmentName)
+      : undefined;
+
+    const updated = await prisma.$transaction(async (tx) => {
+      if (shouldUpdateDepartment) {
+        await tx.departmentUser.deleteMany({ where: { userId: target.id } });
+        if (resolvedDepartmentId) {
+          await tx.departmentUser.create({
+            data: {
+              userId: target.id,
+              departmentId: resolvedDepartmentId,
+            },
+          });
+        }
+      }
+
+      return tx.user.update({
+        where: { id: target.id },
+        data: {
+          approvalStatus: UserApprovalStatus.APPROVED,
+          isActive: true,
+          ...(input.role !== undefined ? { role: toPrismaUserRole(input.role) } : {}),
+        },
+        select: USER_ROW_SELECT,
+      });
+    });
+
+    invalidateAuthUserCache(tenant.organizationId, target.id);
+    const connectionsByOwner = await getWhatsAppConnectionsByOwner(tenant.organizationId);
+    const serialized = serializeUserRow(updated, connectionsByOwner);
+    const sectorSuffix = serialized.department ? ` no setor ${serialized.department}` : '';
+
+    return reply.send({
+      user: serialized,
+      message: `Cadastro de "${updated.name}" aprovado${sectorSuffix}! Acesso liberado.`,
+    });
+  });
+
+  // POST /api/v1/users/:id/reject — recusa e remove uma solicitação de auto-cadastro pendente
+  app.post('/:id/reject', async (request, reply) => {
+    const tenant = getTenantContext(request);
+    const { id } = request.params as { id: string };
+
+    const target = await prisma.user.findFirst({
+      where: { id, organizationId: tenant.organizationId },
+      select: { id: true, name: true, email: true, approvalStatus: true },
+    });
+
+    if (!target) {
+      throw new AppError(404, 'USER_NOT_FOUND', 'Solicitação de usuário não encontrada nesta organização.');
+    }
+
+    if (target.email.toLowerCase() === PRIMARY_ADMIN_EMAIL || target.id === tenant.userId) {
+      throw new AppError(403, 'PRIMARY_ADMIN_PROTECTED', 'Esta conta protegida não pode ser recusada.');
+    }
+
+    if (target.approvalStatus !== UserApprovalStatus.PENDING) {
+      throw new AppError(
+        400,
+        'USER_NOT_PENDING',
+        'Este usuário já está aprovado. Use a opção "Remover usuário" se desejar excluí-lo.'
+      );
+    }
+
+    await prisma.user.delete({
+      where: { id: target.id },
+    });
+
+    invalidateAuthUserCache(tenant.organizationId, target.id);
+
+    return reply.send({
+      rejected: true,
+      userId: target.id,
+      message: `Solicitação de cadastro de "${target.name}" recusada e removida.`,
     });
   });
 
