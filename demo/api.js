@@ -394,6 +394,10 @@
           if (handlers.onWhatsAppStatus) handlers.onWhatsAppStatus(payload);
         });
 
+        socket.on('whatsapp:connection_deleted', (payload) => {
+          if (handlers.onConnectionDeleted) handlers.onConnectionDeleted(payload);
+        });
+
         socket.on('whatsapp:history_synced', (payload) => {
           if (handlers.onHistorySynced) handlers.onHistorySynced(payload);
         });

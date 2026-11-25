@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import {
   ChannelType,
+  ConnectionProvider,
   ConnectionStatus,
   ConversationEventType,
   ConversationStatus,
@@ -50,14 +51,41 @@ const createConversationSchema = z.object({
   departmentId: z.string().uuid().optional(),
 });
 
+async function getConnectedConnectionIds(organizationId: string): Promise<string[]> {
+  const activeConnections = await prisma.connection.findMany({
+    where: {
+      organizationId,
+      status: ConnectionStatus.ACTIVE,
+    },
+    select: {
+      id: true,
+      channel: true,
+      provider: true,
+    },
+  });
+
+  const visibleIds: string[] = [];
+  for (const conn of activeConnections) {
+    if (conn.channel === ChannelType.WHATSAPP && conn.provider === ConnectionProvider.BAILEYS) {
+      const snap = whatsappManager.getSnapshot(conn.id);
+      if (snap.status === 'CONNECTED') {
+        visibleIds.push(conn.id);
+      }
+    } else {
+      visibleIds.push(conn.id);
+    }
+  }
+  return visibleIds;
+}
+
 export async function conversationsRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', authenticate);
 
-  // GET /api/v1/conversations/meta — departamentos, agentes da organização e etiquetas
+  // GET /api/v1/conversations/meta — departamentos, agentes da organização, etiquetas e conexões ativas
   app.get('/meta', async (request, reply) => {
     const tenant = getTenantContext(request);
 
-    const [departments, agents, labels, cannedResponses] = await Promise.all([
+    const [departments, agents, labels, cannedResponses, connectedConnectionIds] = await Promise.all([
       prisma.department.findMany({
         where: { organizationId: tenant.organizationId, isActive: true },
         orderBy: { name: 'asc' },
@@ -82,15 +110,30 @@ export async function conversationsRoutes(app: FastifyInstance): Promise<void> {
         orderBy: { shortcode: 'asc' },
         select: { id: true, shortcode: true, title: true, content: true },
       }),
+      getConnectedConnectionIds(tenant.organizationId),
     ]);
 
-    return reply.send({ departments, agents, labels, cannedResponses });
+    return reply.send({
+      departments,
+      agents,
+      labels,
+      cannedResponses,
+      connectedConnectionIds,
+    });
   });
 
-  // GET /api/v1/conversations
+  // GET /api/v1/conversations — retorna apenas conversas de conexões atualmente CONNECTED
   app.get('/', async (request, reply) => {
     const tenant = getTenantContext(request);
     const query = listConversationsQuerySchema.parse(request.query);
+
+    const connectedConnectionIds = await getConnectedConnectionIds(tenant.organizationId);
+    if (connectedConnectionIds.length === 0) {
+      return reply.send({
+        conversations: [],
+        counts: { mine: 0, queue: 0, total: 0, unread: 0 },
+      });
+    }
 
     // Enfileira em segundo plano (com throttle) os contatos/grupos ainda sem avatarUrl
     const activeSession = whatsappManager.getActiveSessionForOrganization(tenant.organizationId);
@@ -104,28 +147,45 @@ export async function conversationsRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
+    const connectedKey = [...connectedConnectionIds].sort().join(',');
     const cacheParams = {
       tab: query.tab,
       status: query.status,
       sort: query.sort,
       q: query.q,
       userId: tenant.userId,
+      connectedKey,
     };
 
     const cached = apiCache.getConversations(tenant.organizationId, cacheParams);
     if (cached) {
       const withPresence = cached.map((conv) => {
-        const row = conv as { id: string } & Record<string, unknown>;
+        const row = conv as {
+          id: string;
+          status?: string;
+          assigneeId?: string | null;
+          unread?: number;
+        } & Record<string, unknown>;
         return {
           ...row,
           presence: whatsappManager.getConversationPresence(row.id),
         };
       });
-      return reply.send({ conversations: withPresence });
+      const openRows = withPresence.filter((c) => c.status !== 'resolved');
+      return reply.send({
+        conversations: withPresence,
+        counts: {
+          mine: openRows.filter((c) => c.assigneeId === tenant.userId).length,
+          queue: openRows.filter((c) => !c.assigneeId).length,
+          total: withPresence.length,
+          unread: openRows.reduce((acc, c) => acc + (typeof c.unread === 'number' ? c.unread : 0), 0),
+        },
+      });
     }
 
     const where: Record<string, unknown> = {
       organizationId: tenant.organizationId,
+      connectionId: { in: connectedConnectionIds },
     };
 
     if (query.status === 'open') {
@@ -173,7 +233,17 @@ export async function conversationsRoutes(app: FastifyInstance): Promise<void> {
       presence: whatsappManager.getConversationPresence(conv.id),
     }));
 
-    return reply.send({ conversations: withPresence });
+    const openRows = withPresence.filter((c) => c.status !== 'resolved');
+
+    return reply.send({
+      conversations: withPresence,
+      counts: {
+        mine: openRows.filter((c) => c.assigneeId === tenant.userId).length,
+        queue: openRows.filter((c) => !c.assigneeId).length,
+        total: withPresence.length,
+        unread: openRows.reduce((acc, c) => acc + (c.unread || 0), 0),
+      },
+    });
   });
 
   // POST /api/v1/conversations — abre conversa existente (OPEN/PENDING) ou cria novo chamado para o contato

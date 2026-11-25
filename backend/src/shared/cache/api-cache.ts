@@ -39,10 +39,10 @@ class ApiMemoryCache {
 
   private buildConvKey(
     organizationId: string,
-    params: { tab: string; status: string; sort: string; q?: string; userId?: string }
+    params: { tab: string; status: string; sort: string; q?: string; userId?: string; connectedKey?: string }
   ): string {
     const scopeUser = params.tab === 'mine' ? params.userId ?? '' : '';
-    return `${organizationId}|${params.tab}|${params.status}|${params.sort}|${(params.q ?? '').toLowerCase()}|${scopeUser}`;
+    return `${organizationId}|${params.tab}|${params.status}|${params.sort}|${(params.q ?? '').toLowerCase()}|${scopeUser}|${params.connectedKey ?? ''}`;
   }
 
   private buildMsgKey(organizationId: string, conversationId: string): string {
@@ -51,7 +51,7 @@ class ApiMemoryCache {
 
   getConversations<T = unknown>(
     organizationId: string,
-    params: { tab: string; status: string; sort: string; q?: string; userId?: string }
+    params: { tab: string; status: string; sort: string; q?: string; userId?: string; connectedKey?: string }
   ): T[] | null {
     const key = this.buildConvKey(organizationId, params);
     const entry = this.conversationsList.get(key);
@@ -65,7 +65,7 @@ class ApiMemoryCache {
 
   setConversations<T = unknown>(
     organizationId: string,
-    params: { tab: string; status: string; sort: string; q?: string; userId?: string },
+    params: { tab: string; status: string; sort: string; q?: string; userId?: string; connectedKey?: string },
     value: T[],
     ttlMs = DEFAULT_TTL_MS
   ): void {
@@ -81,6 +81,15 @@ class ApiMemoryCache {
     for (const key of this.conversationsList.keys()) {
       if (key.startsWith(prefix)) {
         this.conversationsList.delete(key);
+      }
+    }
+  }
+
+  invalidateOrgMessages(organizationId: string): void {
+    const prefix = `${organizationId}:`;
+    for (const key of this.conversationMessages.keys()) {
+      if (key.startsWith(prefix)) {
+        this.conversationMessages.delete(key);
       }
     }
   }

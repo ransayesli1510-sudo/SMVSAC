@@ -15,6 +15,7 @@ import { ChannelType, ConnectionProvider, ConnectionStatus } from '@prisma/clien
 
 import { env } from '../../config/env.js';
 import { prisma } from '../../shared/database/prisma.js';
+import { apiCache } from '../../shared/cache/api-cache.js';
 import { extractDigitsFromJid, formatPhoneFromJid, isGroupJid, isLidJid } from '../../shared/formatters/ticket.js';
 import { emitToOrganization } from '../../realtime/socket.js';
 import {
@@ -259,6 +260,12 @@ class WhatsAppSessionManager {
     for (const [convId, entry] of this.activePresences.entries()) {
       if (entry.connectionId === connectionId) {
         this.setConversationPresence(entry.organizationId, connectionId, convId, null);
+      }
+    }
+    const jidPrefix = `${connectionId}:`;
+    for (const key of this.jidToConversationCache.keys()) {
+      if (key.startsWith(jidPrefix)) {
+        this.jidToConversationCache.delete(key);
       }
     }
   }
@@ -570,6 +577,8 @@ class WhatsAppSessionManager {
           },
         });
 
+        apiCache.invalidateOrgConversations(organizationId);
+
         emitToOrganization(organizationId, 'whatsapp:status', {
           connectionId,
           status: entry.status,
@@ -605,6 +614,7 @@ class WhatsAppSessionManager {
             where: { id: connectionId, organizationId },
             data: { status: ConnectionStatus.DISCONNECTED, credentialsEncrypted: null },
           });
+          apiCache.invalidateOrgConversations(organizationId);
           emitToOrganization(organizationId, 'whatsapp:status', {
             connectionId,
             status: 'DISCONNECTED',
@@ -916,6 +926,8 @@ class WhatsAppSessionManager {
         ...(clearAuth ? { credentialsEncrypted: null } : {}),
       },
     });
+
+    apiCache.invalidateOrgConversations(organizationId);
 
     emitToOrganization(organizationId, 'whatsapp:status', {
       connectionId,

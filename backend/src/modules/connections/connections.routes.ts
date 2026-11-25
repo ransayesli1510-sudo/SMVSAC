@@ -3,8 +3,10 @@ import { ChannelType, ConnectionProvider, ConnectionStatus, UserRole } from '@pr
 import { z } from 'zod';
 
 import { prisma } from '../../shared/database/prisma.js';
+import { apiCache } from '../../shared/cache/api-cache.js';
 import { authenticate, getTenantContext } from '../../shared/http/authenticate.js';
 import { AppError } from '../../shared/http/errors.js';
+import { emitToOrganization } from '../../realtime/socket.js';
 import { whatsappManager } from '../whatsapp/whatsapp.manager.js';
 
 const createConnectionSchema = z.object({
@@ -335,20 +337,25 @@ export async function connectionsRoutes(app: FastifyInstance): Promise<void> {
         where: { id: conn.id },
         data: { status: ConnectionStatus.ARCHIVED },
       });
+      apiCache.invalidateOrgConversations(tenant.organizationId);
     } else if (action === 'activate' || action === 'reconnect') {
       await prisma.connection.update({
         where: { id: conn.id },
         data: { status: ConnectionStatus.ACTIVE },
       });
+      apiCache.invalidateOrgConversations(tenant.organizationId);
       if (conn.channel === ChannelType.WHATSAPP && conn.provider === ConnectionProvider.BAILEYS) {
         void whatsappManager.startSession(conn.id, tenant.organizationId);
       }
     } else if (action === 'pause') {
       await whatsappManager.setPaused(conn.id, tenant.organizationId, true);
+      apiCache.invalidateOrgConversations(tenant.organizationId);
     } else if (action === 'resume') {
       await whatsappManager.setPaused(conn.id, tenant.organizationId, false);
+      apiCache.invalidateOrgConversations(tenant.organizationId);
     } else if (action === 'disconnect') {
       await whatsappManager.disconnectSession(conn.id, tenant.organizationId, true);
+      apiCache.invalidateOrgConversations(tenant.organizationId);
     }
 
     return reply.send({ ok: true, connectionId: conn.id, action });
@@ -413,36 +420,49 @@ export async function connectionsRoutes(app: FastifyInstance): Promise<void> {
     return reply.send({ ok: true, connectionId: conn.id });
   });
 
-  // DELETE /api/v1/connections/:id
+  // DELETE /api/v1/connections/:id — encerra socket Baileys, limpa sessão e remove conversas/mensagens vinculadas
   app.delete('/:id', async (request, reply) => {
     const tenant = getTenantContext(request);
     const { id } = request.params as { id: string };
 
     const conn = await prisma.connection.findFirst({
       where: { id, organizationId: tenant.organizationId },
-      include: { _count: { select: { conversations: true } } },
+      select: { id: true, name: true, metadata: true },
     });
     if (!conn) {
       throw new AppError(404, 'CONNECTION_NOT_FOUND', 'Conexão não encontrada.');
     }
     assertCanManageConnection(tenant, conn.metadata);
 
+    // 1. Encerra socket ativo do Baileys e limpa sessão/credenciais (PostgreSQL e/ou disco)
     await whatsappManager.disconnectSession(conn.id, tenant.organizationId, true);
 
-    if (conn._count.conversations > 0) {
-      // Preserva histórico de conversas vinculadas arquivando a conexão
-      await prisma.connection.update({
-        where: { id: conn.id },
-        data: { status: ConnectionStatus.ARCHIVED },
+    // 2. Exclui conversas (cascateia mensagens, anexos, eventos e etiquetas), identidades e a conexão
+    const deletedConversationsCount = await prisma.$transaction(async (tx) => {
+      const deletedConvs = await tx.conversation.deleteMany({
+        where: { organizationId: tenant.organizationId, connectionId: conn.id },
       });
-      return reply.send({
-        deleted: false,
-        archived: true,
-        message: 'Conexão desconectada e arquivada para preservar o histórico de conversas.',
+      await tx.contactIdentity.deleteMany({
+        where: { connectionId: conn.id },
       });
-    }
+      await tx.connection.delete({ where: { id: conn.id } });
+      return deletedConvs.count;
+    });
 
-    await prisma.connection.delete({ where: { id: conn.id } });
-    return reply.send({ deleted: true, connectionId: conn.id });
+    apiCache.invalidateOrgConversations(tenant.organizationId);
+    apiCache.invalidateOrgMessages(tenant.organizationId);
+    apiCache.invalidateOrgContacts(tenant.organizationId);
+
+    emitToOrganization(tenant.organizationId, 'whatsapp:connection_deleted', {
+      connectionId: conn.id,
+      deletedConversations: deletedConversationsCount,
+    });
+
+    return reply.send({
+      deleted: true,
+      connectionId: conn.id,
+      deletedConversations: deletedConversationsCount,
+      message: `Conexão "${conn.name}" e histórico vinculado excluídos com sucesso.`,
+    });
   });
 }

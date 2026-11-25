@@ -582,10 +582,20 @@
   async function loadBackendConnections() {
     if (!state.apiConnected || !API) return;
     try {
+      const prevStates = new Map(state.connections.map((c) => [c.id, c.sessionState]));
       const { connections } = await API.getConnections();
       if (Array.isArray(connections)) {
+        let anyBecameConnected = false;
+        const newlyDisconnectedIds = [];
+
         state.connections = connections.map((c) => {
           const prev = state.connections.find((x) => x.id === c.id);
+          const prevState = prevStates.get(c.id);
+          if (prevState && prevState !== 'connected' && c.sessionState === 'connected') {
+            anyBecameConnected = true;
+          } else if (prevState === 'connected' && c.sessionState === 'disconnected') {
+            newlyDisconnectedIds.push(c.id);
+          }
           return {
             ...c,
             isRemote: true,
@@ -605,6 +615,14 @@
           };
         });
         if (state.view === 'connections') renderConnections();
+
+        if (newlyDisconnectedIds.length > 0) {
+          newlyDisconnectedIds.forEach((connId) => clearConversationsUIForConnection(connId, false));
+          void loadBackendConversations(false);
+        }
+        if (anyBecameConnected) {
+          void loadBackendConversations(true);
+        }
       }
     } catch (err) {
       console.warn('[API] Falha ao carregar conexões:', err);
@@ -740,6 +758,47 @@
       .catch(() => {});
   }
 
+  function clearConversationsUIForConnection(connectionId = null, syncFromApi = true) {
+    const removedIds = new Set();
+    if (connectionId) {
+      state.conversations = state.conversations.filter((c) => {
+        const matchesConn = c.connectionId === connectionId;
+        if (matchesConn) removedIds.add(String(c.id));
+        return !matchesConn;
+      });
+    } else {
+      state.conversations.forEach((c) => removedIds.add(String(c.id)));
+      state.conversations = [];
+    }
+
+    // Se nenhuma conexão está conectada, garante lista 100% zerada
+    const hasAnyConnected = state.connections.some(
+      (c) => c.status !== 'archived' && c.sessionState === 'connected'
+    );
+    if (!hasAnyConnected) {
+      state.conversations.forEach((c) => removedIds.add(String(c.id)));
+      state.conversations = [];
+    }
+
+    removedIds.forEach((convId) => setConversationPresence(convId, null));
+
+    const selectedStillExists =
+      state.selectedConvId !== null &&
+      state.conversations.some((c) => String(c.id) === String(state.selectedConvId));
+
+    if (!selectedStillExists || state.conversations.length === 0) {
+      state.selectedConvId = null;
+      $('#detailsDrawer')?.classList.add('hidden');
+      $('#chatInlineSearch')?.classList.add('hidden');
+    }
+
+    renderConversations();
+
+    if (syncFromApi && state.apiConnected) {
+      void loadBackendConversations(false);
+    }
+  }
+
   async function loadBackendConversations(selectFirst = false) {
     if (!state.apiConnected || !API) return;
     try {
@@ -757,11 +816,16 @@
           state.selectedConvId = state.conversations[0].id;
         }
         renderConversations();
-        void loadMessagesForConversation(state.selectedConvId);
+        if (state.selectedConvId) {
+          void loadMessagesForConversation(state.selectedConvId);
+        }
       } else if (Array.isArray(conversations)) {
-        // Se ainda não há conversas reais no banco, mantém tela limpa pronta para receber do WhatsApp
+        // Sem conexões conectadas ou sem conversas: limpa tudo imediatamente e zera contadores/badges
+        clearAllConversationPresences();
         state.conversations = [];
         state.selectedConvId = null;
+        $('#detailsDrawer')?.classList.add('hidden');
+        $('#chatInlineSearch')?.classList.add('hidden');
         renderConversations();
       }
     } catch (err) {
@@ -1099,6 +1163,7 @@
         stopFallbackSyncPolling();
         return;
       }
+      void loadBackendConnections();
       void loadBackendConversations(false);
       if (state.selectedConvId) {
         void loadMessagesForConversation(state.selectedConvId);
@@ -1296,26 +1361,48 @@
       },
       onWhatsAppStatus(payload) {
         const target = state.connections.find((c) => c.id === payload.connectionId);
+        const normalizedStatus = String(payload.status || '').toUpperCase();
+        const isDisconnected =
+          normalizedStatus === 'DISCONNECTED' ||
+          normalizedStatus === 'LOGGED_OUT' ||
+          payload.reason === 'logged_out';
+
         if (target) {
-          if (payload.status === 'CONNECTED') {
+          if (normalizedStatus === 'CONNECTED') {
             stopWaQrPolling();
             target.sessionState = 'connected';
             target.status = 'active';
             if (payload.identifier) target.identifier = payload.identifier;
             pushConnectionEvent(target, `WhatsApp conectado (${target.identifier})`, 'success');
-          } else if (payload.status === 'PAUSED') {
+          } else if (normalizedStatus === 'PAUSED') {
             target.sessionState = 'paused';
-          } else if (payload.status === 'CONNECTING') {
+          } else if (normalizedStatus === 'CONNECTING') {
             target.sessionState = 'restarting';
-          } else if (payload.status === 'DISCONNECTED') {
+          } else if (isDisconnected) {
             target.sessionState = 'disconnected';
             pushConnectionEvent(target, 'WhatsApp desconectado', 'danger');
           }
           if (state.view === 'connections') renderConnections();
         }
+
+        if (isDisconnected) {
+          clearConversationsUIForConnection(payload.connectionId, true);
+        } else if (normalizedStatus === 'CONNECTED') {
+          void loadBackendConversations(true);
+        }
+
         if (state.waQrConnectionId === payload.connectionId) {
           updateWaQrModalState(payload);
         }
+      },
+      onConnectionDeleted(payload) {
+        if (!payload?.connectionId) return;
+        const idx = state.connections.findIndex((c) => c.id === payload.connectionId);
+        if (idx !== -1) {
+          state.connections.splice(idx, 1);
+          if (state.view === 'connections') renderConnections();
+        }
+        clearConversationsUIForConnection(payload.connectionId, true);
       },
       onHistorySynced(payload) {
         void loadBackendConversations(false);
@@ -1675,9 +1762,11 @@
   function renderActiveChat() {
     const conv = getSelectedConv();
     if (!conv) {
+      $('#chatAvatar').innerHTML = '';
       $('#chatCustomerName').textContent = 'Selecione uma conversa';
       $('#chatHeaderPills').innerHTML = '';
       renderActiveChatPresence(null);
+      $('#detailsDrawer')?.classList.add('hidden');
       $('#chatMessages').innerHTML =
         '<div class="empty-hint" style="margin:auto;text-align:center;">Conecte um WhatsApp via QR Code em <strong>Conexões → + Adicionar</strong> ou selecione um chamado ao lado.</div>';
       return;
@@ -2436,7 +2525,10 @@
         void API.updateConnectionStatus(conn.id, nextAction).catch(() => { });
       }
       conn.status = conn.status === 'active' ? 'archived' : 'active';
-      if (conn.status === 'active' && conn.sessionState === 'disconnected') {
+      if (conn.status === 'archived') {
+        conn.sessionState = 'disconnected';
+        clearConversationsUIForConnection(conn.id, true);
+      } else if (conn.status === 'active' && conn.sessionState === 'disconnected') {
         conn.sessionState = 'connected';
       }
       pushConnectionEvent(
@@ -2510,6 +2602,7 @@
       } else {
         if (state.apiConnected && conn.isRemote) void API.updateConnectionStatus(conn.id, 'disconnect').catch(() => { });
         conn.sessionState = 'disconnected';
+        clearConversationsUIForConnection(conn.id, true);
         pushConnectionEvent(conn, 'Sessão desconectada manualmente', 'danger');
         pushNotification({
           category: 'alert',
@@ -4560,19 +4653,15 @@
         if (state.apiConnected && target.isRemote) {
           try {
             const res = await API.deleteConnection(target.id);
-            if (res.archived) {
-              target.status = 'archived';
-              target.sessionState = 'disconnected';
-              toast(res.message || `Conexão "${target.name}" arquivada.`);
-            } else {
-              state.connections.splice(idx, 1);
-              toast(`Conexão "${target.name}" excluída!`);
-            }
+            state.connections.splice(idx, 1);
+            clearConversationsUIForConnection(target.id, true);
+            toast(res.message || `Conexão "${target.name}" excluída!`);
           } catch (err) {
             toast(`Erro ao excluir: ${err.message}`);
           }
         } else {
           state.connections.splice(idx, 1);
+          clearConversationsUIForConnection(target.id, false);
           toast(`Conexão "${target.name}" excluída!`);
         }
       }
