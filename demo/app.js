@@ -49,6 +49,10 @@
     usersList: [],
     usersSearch: '',
     usersRoleFilter: 'all',
+    usersDeptFilter: 'all',
+    openUserMenuId: null,
+    editingUserId: null,
+    resetPwdUserId: null,
     deletingUserId: null,
     theme: localStorage.getItem('smv_sac_theme') || 'dark',
     view: 'conversations', // conversations | connections | contacts | reports | ai
@@ -2608,6 +2612,73 @@
   // ========================================================================
   // VIEW 5: USUÁRIOS (GESTÃO DE PERFIS ADMINISTRADOR E USER)
   // ========================================================================
+  function getAvailableDepartmentsList() {
+    if (Array.isArray(state.backendDepartments) && state.backendDepartments.length > 0) {
+      return state.backendDepartments.map((d) => ({ id: d.id || null, name: d.name }));
+    }
+    return (DATA.departments || []).map((name) => ({ id: null, name }));
+  }
+
+  function populateUserDepartmentSelect(selectEl, selectedDeptId = '', selectedDeptName = '') {
+    if (!selectEl) return;
+    const depts = getAvailableDepartmentsList();
+    const opts = ['<option value="">Sem setor específico</option>'];
+    let matchedValue = '';
+
+    depts.forEach((d) => {
+      const isMatch =
+        (selectedDeptId && d.id && String(d.id) === String(selectedDeptId)) ||
+        (selectedDeptName && d.name.toLowerCase() === String(selectedDeptName).toLowerCase());
+      if (isMatch) matchedValue = d.name;
+      opts.push(
+        `<option value="${escapeHtml(d.name)}" data-dept-id="${escapeHtml(d.id || '')}">${escapeHtml(d.name)}</option>`
+      );
+    });
+
+    if (!matchedValue && selectedDeptName) {
+      matchedValue = selectedDeptName;
+      opts.push(
+        `<option value="${escapeHtml(selectedDeptName)}" data-dept-id="${escapeHtml(selectedDeptId || '')}">${escapeHtml(selectedDeptName)}</option>`
+      );
+    }
+
+    selectEl.innerHTML = opts.join('');
+    selectEl.value = matchedValue;
+  }
+
+  function readSelectedDepartmentPayload(selectEl) {
+    if (!selectEl) return { departmentId: null, departmentName: null };
+    const selectedOption = selectEl.options[selectEl.selectedIndex];
+    const departmentName = (selectEl.value || '').trim();
+    const departmentId = (selectedOption?.dataset?.deptId || '').trim();
+    return {
+      departmentId: departmentId || null,
+      departmentName: departmentName || null,
+    };
+  }
+
+  function syncUsersDeptFilterOptions() {
+    const filterEl = $('#usersDeptFilter');
+    if (!filterEl) return;
+    const prevValue = state.usersDeptFilter || 'all';
+    const names = new Set(getAvailableDepartmentsList().map((d) => d.name));
+    state.usersList.forEach((u) => {
+      if (u.department) names.add(u.department);
+    });
+    const sortedNames = [...names].sort((a, b) => a.localeCompare(b, 'pt-BR'));
+    filterEl.innerHTML = [
+      '<option value="all">Setor: Todos</option>',
+      '<option value="__none__">Sem setor</option>',
+      ...sortedNames.map((n) => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`),
+    ].join('');
+    if ([...filterEl.options].some((o) => o.value === prevValue)) {
+      filterEl.value = prevValue;
+    } else {
+      state.usersDeptFilter = 'all';
+      filterEl.value = 'all';
+    }
+  }
+
   async function loadBackendUsers() {
     if (!API?.getToken() || !isCurrentUserAdmin()) return;
     try {
@@ -2630,15 +2701,21 @@
       badge.classList.toggle('hidden', source.length === 0);
     }
 
+    syncUsersDeptFilterOptions();
+
     const q = (state.usersSearch || '').trim().toLowerCase();
     const roleFilter = state.usersRoleFilter || 'all';
+    const deptFilter = state.usersDeptFilter || 'all';
 
     const filtered = source.filter((u) => {
       if (roleFilter !== 'all' && u.role !== roleFilter) return false;
+      if (deptFilter === '__none__' && u.department) return false;
+      if (deptFilter !== 'all' && deptFilter !== '__none__' && (u.department || '') !== deptFilter) return false;
       if (q) {
         const match =
           (u.name || '').toLowerCase().includes(q) ||
           (u.email || '').toLowerCase().includes(q) ||
+          (u.department || '').toLowerCase().includes(q) ||
           (u.profileLabel || '').toLowerCase().includes(q);
         if (!match) return false;
       }
@@ -2648,7 +2725,7 @@
     if (filtered.length === 0) {
       tbody.innerHTML = `
         <tr>
-          <td colspan="5" style="text-align:center;padding:36px 16px;color:var(--text-muted);">
+          <td colspan="6" style="text-align:center;padding:36px 16px;color:var(--text-muted);">
             Nenhum usuário encontrado com os filtros aplicados.
           </td>
         </tr>
@@ -2684,9 +2761,13 @@
               : 'archived';
 
         const canMutate = !isPrimary && !isSelf;
+        const isMenuOpen = state.openUserMenuId === u.id;
+        const sectorHtml = u.department
+          ? `<span class="sector-pill">${escapeHtml(u.department)}</span>`
+          : `<span class="sector-pill empty">Sem setor</span>`;
 
         return `
-          <tr>
+          <tr class="user-row ${isMenuOpen ? 'menu-open' : ''}">
             <td>
               <div style="display:flex;align-items:center;gap:10px;">
                 <div class="avatar xs ${isAdmin ? 'yellow-avatar' : ''}">${escapeHtml(initials)}</div>
@@ -2700,6 +2781,7 @@
                 </div>
               </div>
             </td>
+            <td>${sectorHtml}</td>
             <td>
               <span class="role-pill ${isAdmin ? 'admin' : 'user'}">
                 ${isAdmin ? '🛡️ Administrador' : '👤 User'}
@@ -2713,18 +2795,48 @@
             </td>
             <td style="text-align:right;">
               <div class="user-actions-cell">
-                ${
-                  canMutate
-                    ? `
-                      <button type="button" class="btn secondary pill sm-action" data-toggle-user-role="${escapeHtml(u.id)}" data-next-role="${isAdmin ? 'USER' : 'ADMIN'}">
-                        ${isAdmin ? 'Tornar User' : 'Tornar Admin'}
-                      </button>
-                      <button type="button" class="btn danger-outline pill sm-action" data-delete-user-id="${escapeHtml(u.id)}">
-                        Remover
-                      </button>
-                    `
-                    : `<span style="font-size:11.5px;color:var(--text-muted);">Protegido</span>`
-                }
+                <div class="user-menu-wrap">
+                  <button
+                    type="button"
+                    class="conn-menu-trigger"
+                    data-user-menu-toggle="${escapeHtml(u.id)}"
+                    title="Opções do usuário"
+                    aria-label="Opções de ${escapeHtml(u.name)}"
+                    aria-haspopup="menu"
+                    aria-expanded="${isMenuOpen ? 'true' : 'false'}"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                      <circle cx="12" cy="5" r="2" />
+                      <circle cx="12" cy="12" r="2" />
+                      <circle cx="12" cy="19" r="2" />
+                    </svg>
+                  </button>
+                  <div class="conn-menu-dropdown user-menu-dropdown ${isMenuOpen ? '' : 'hidden'}" role="menu">
+                    <button type="button" class="conn-menu-item" data-user-action="edit" data-user-id="${escapeHtml(u.id)}" role="menuitem">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                      <span>Editar usuário</span>
+                    </button>
+                    <button type="button" class="conn-menu-item" data-user-action="reset-password" data-user-id="${escapeHtml(u.id)}" role="menuitem">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                      <span>Redefinir senha</span>
+                    </button>
+                    ${
+                      canMutate
+                        ? `
+                          <button type="button" class="conn-menu-item" data-user-action="toggle-role" data-user-id="${escapeHtml(u.id)}" data-next-role="${isAdmin ? 'USER' : 'ADMIN'}" role="menuitem">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                            <span>${isAdmin ? 'Tornar User' : 'Tornar Administrador'}</span>
+                          </button>
+                          <div class="conn-menu-divider"></div>
+                          <button type="button" class="conn-menu-item danger" data-user-action="delete" data-user-id="${escapeHtml(u.id)}" role="menuitem">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+                            <span>Remover usuário</span>
+                          </button>
+                        `
+                        : ''
+                    }
+                  </div>
+                </div>
               </div>
             </td>
           </tr>
@@ -2732,32 +2844,56 @@
       })
       .join('');
 
-    $$('[data-toggle-user-role]').forEach((btn) => {
-      btn.onclick = async () => {
-        const userId = btn.dataset.toggleUserRole;
-        const nextRole = btn.dataset.nextRole;
-        if (!API?.getToken()) {
-          forceRedirectToLogin('Sua sessão expirou. Faça login novamente.');
-          return;
-        }
-        try {
-          const res = await API.updateUserRole(userId, nextRole);
-          await loadBackendUsers();
-          toast(res.message || 'Perfil atualizado com sucesso!');
-        } catch (err) {
-          toast(`❌ ${formatApiErrorMessage(err, 'Erro ao alterar perfil.')}`);
-        }
+    $$('[data-user-menu-toggle]').forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const userId = btn.dataset.userMenuToggle;
+        state.openUserMenuId = state.openUserMenuId === userId ? null : userId;
+        renderUsers();
       };
     });
 
-    $$('[data-delete-user-id]').forEach((btn) => {
-      btn.onclick = () => {
-        const userId = btn.dataset.deleteUserId;
+    $$('[data-user-action]').forEach((btn) => {
+      btn.onclick = async (e) => {
+        e.stopPropagation();
+        const action = btn.dataset.userAction;
+        const userId = btn.dataset.userId;
         const target = source.find((x) => x.id === userId);
+        state.openUserMenuId = null;
+        renderUsers();
         if (!target) return;
-        state.deletingUserId = target.id;
-        $('#deleteUserMessage').innerHTML = `Tem certeza que deseja remover o usuário <strong>${escapeHtml(target.name)}</strong> (${escapeHtml(target.email)})? Ele perderá o acesso imediatamente.`;
-        $('#deleteUserModal').classList.remove('hidden');
+
+        if (action === 'edit') {
+          openEditUserModal(target);
+          return;
+        }
+
+        if (action === 'reset-password') {
+          openResetUserPasswordModal(target);
+          return;
+        }
+
+        if (action === 'toggle-role') {
+          const nextRole = btn.dataset.nextRole;
+          if (!API?.getToken()) {
+            forceRedirectToLogin('Sua sessão expirou. Faça login novamente.');
+            return;
+          }
+          try {
+            const res = await API.updateUserRole(userId, nextRole);
+            await loadBackendUsers();
+            toast(res.message || 'Perfil atualizado com sucesso!');
+          } catch (err) {
+            toast(`❌ ${formatApiErrorMessage(err, 'Erro ao alterar perfil.')}`);
+          }
+          return;
+        }
+
+        if (action === 'delete') {
+          state.deletingUserId = target.id;
+          $('#deleteUserMessage').innerHTML = `Tem certeza que deseja remover o usuário <strong>${escapeHtml(target.name)}</strong> (${escapeHtml(target.email)})? Ele perderá o acesso imediatamente.`;
+          $('#deleteUserModal').classList.remove('hidden');
+        }
       };
     });
   }
@@ -2770,6 +2906,7 @@
     $('#newUserName').value = '';
     $('#newUserEmail').value = '';
     $('#newUserRole').value = 'USER';
+    populateUserDepartmentSelect($('#newUserDepartment'), '', '');
     $('#newUserPassword').value = '';
     $('#newUserPassword').type = 'password';
     $('#newUserError').classList.add('hidden');
@@ -2780,6 +2917,77 @@
 
   function closeAddUserModal() {
     $('#addUserModal')?.classList.add('hidden');
+  }
+
+  function openEditUserModal(user) {
+    if (!isCurrentUserAdmin() || !user) return;
+    const isPrimary = Boolean(user.isPrimaryAdmin) || String(user.email || '').toLowerCase() === PRIMARY_ADMIN_EMAIL;
+    const isSelf =
+      (state.currentUser.id && user.id === state.currentUser.id) ||
+      String(user.email || '').toLowerCase() === String(state.currentUser.email || '').toLowerCase();
+
+    state.editingUserId = user.id;
+    $('#editUserModalSub').textContent = `Editando cadastro de ${user.name} (${user.email}).`;
+    $('#editUserName').value = user.name || '';
+    $('#editUserEmail').value = user.email || '';
+    $('#editUserEmail').disabled = isPrimary;
+
+    const emailHint = $('#editUserEmailHint');
+    if (emailHint) {
+      if (isPrimary) {
+        emailHint.textContent = 'O e-mail do administrador principal é protegido e não pode ser alterado.';
+        emailHint.classList.remove('hidden');
+      } else {
+        emailHint.classList.add('hidden');
+      }
+    }
+
+    populateUserDepartmentSelect($('#editUserDepartment'), user.departmentId || '', user.department || '');
+
+    const roleSelect = $('#editUserRole');
+    roleSelect.value = user.role === 'ADMIN' ? 'ADMIN' : 'USER';
+    roleSelect.disabled = isPrimary || isSelf;
+
+    const roleHint = $('#editUserRoleHint');
+    if (roleHint) {
+      if (isPrimary) {
+        roleHint.textContent = 'O administrador principal mantém sempre o perfil Administrador.';
+        roleHint.classList.remove('hidden');
+      } else if (isSelf) {
+        roleHint.textContent = 'Você não pode alterar o seu próprio perfil de acesso.';
+        roleHint.classList.remove('hidden');
+      } else {
+        roleHint.classList.add('hidden');
+      }
+    }
+
+    $('#editUserError').classList.add('hidden');
+    $('#editUserModal').classList.remove('hidden');
+    setTimeout(() => $('#editUserName').focus(), 20);
+  }
+
+  function closeEditUserModal() {
+    state.editingUserId = null;
+    $('#editUserModal')?.classList.add('hidden');
+  }
+
+  function openResetUserPasswordModal(user) {
+    if (!isCurrentUserAdmin() || !user) return;
+    state.resetPwdUserId = user.id;
+    $('#resetUserPwdSubtitle').textContent = `Defina uma nova senha de acesso para ${user.name} (${user.email}).`;
+    $('#resetUserPassword').value = '';
+    $('#resetUserPassword').type = 'password';
+    $('#resetUserPasswordConfirm').value = '';
+    $('#resetUserPasswordConfirm').type = 'password';
+    $('#resetUserPwdError').classList.add('hidden');
+    updatePasswordRulesUI('#resetUserPasswordRules', '', false);
+    $('#resetUserPasswordModal').classList.remove('hidden');
+    setTimeout(() => $('#resetUserPassword').focus(), 20);
+  }
+
+  function closeResetUserPasswordModal() {
+    state.resetPwdUserId = null;
+    $('#resetUserPasswordModal')?.classList.add('hidden');
   }
 
   function closeDeleteUserModal() {
@@ -4094,6 +4302,10 @@
         state.openConnMenuId = null;
         renderConnections();
       }
+      if (state.openUserMenuId !== null && !e.target.closest('.user-menu-wrap')) {
+        state.openUserMenuId = null;
+        renderUsers();
+      }
       if (!e.target.closest('.conv-menu-wrap')) {
         closeConvMenus();
       }
@@ -4469,6 +4681,11 @@
       renderUsers();
     });
 
+    $('#usersDeptFilter')?.addEventListener('change', (e) => {
+      state.usersDeptFilter = e.target.value;
+      renderUsers();
+    });
+
     $('#btnUsersRefresh')?.addEventListener('click', async () => {
       const btn = $('#btnUsersRefresh');
       btn.classList.remove('spinning');
@@ -4508,6 +4725,7 @@
       const name = $('#newUserName').value.trim();
       const email = $('#newUserEmail').value.trim().toLowerCase();
       const role = $('#newUserRole').value === 'ADMIN' ? 'ADMIN' : 'USER';
+      const { departmentId, departmentName } = readSelectedDepartmentPayload($('#newUserDepartment'));
       const password = $('#newUserPassword').value;
       const err = $('#newUserError');
 
@@ -4540,12 +4758,154 @@
       const saveBtn = $('#btnSaveAddUser');
       saveBtn.disabled = true;
       try {
-        const res = await API.createUser({ name, email, password, role });
+        const res = await API.createUser({
+          name,
+          email,
+          password,
+          role,
+          departmentId,
+          departmentName,
+        });
         closeAddUserModal();
         await loadBackendUsers();
         toast(res.message || `Usuário "${name}" criado com sucesso!`);
       } catch (apiErr) {
         err.textContent = formatApiErrorMessage(apiErr, 'Não foi possível criar o usuário.');
+        err.classList.remove('hidden');
+      } finally {
+        saveBtn.disabled = false;
+      }
+    });
+
+    // Modal Editar Usuário
+    $('#btnCloseEditUser')?.addEventListener('click', closeEditUserModal);
+    $('#btnCancelEditUser')?.addEventListener('click', closeEditUserModal);
+    $('#editUserModal')?.addEventListener('click', (e) => {
+      if (e.target === $('#editUserModal')) closeEditUserModal();
+    });
+
+    $('#btnSaveEditUser')?.addEventListener('click', async () => {
+      const targetId = state.editingUserId;
+      if (!targetId) return;
+
+      const name = $('#editUserName').value.trim();
+      const emailInput = $('#editUserEmail');
+      const email = emailInput.value.trim().toLowerCase();
+      const roleSelect = $('#editUserRole');
+      const { departmentId, departmentName } = readSelectedDepartmentPayload($('#editUserDepartment'));
+      const err = $('#editUserError');
+
+      if (!name || name.length < 2) {
+        err.textContent = 'Informe o nome completo (mínimo 2 caracteres).';
+        err.classList.remove('hidden');
+        return;
+      }
+      if (!emailInput.disabled && (!email || !email.includes('@'))) {
+        err.textContent = 'Informe um e-mail válido.';
+        err.classList.remove('hidden');
+        return;
+      }
+
+      err.classList.add('hidden');
+
+      if (!API?.getToken()) {
+        closeEditUserModal();
+        forceRedirectToLogin('Sua sessão expirou. Faça login novamente.');
+        return;
+      }
+
+      const payload = {
+        name,
+        departmentId,
+        departmentName,
+      };
+      if (!emailInput.disabled) payload.email = email;
+      if (!roleSelect.disabled) payload.role = roleSelect.value === 'ADMIN' ? 'ADMIN' : 'USER';
+
+      const saveBtn = $('#btnSaveEditUser');
+      saveBtn.disabled = true;
+      try {
+        const res = await API.updateUser(targetId, payload);
+        if (state.currentUser.id && targetId === state.currentUser.id && res.user) {
+          state.currentUser.name = res.user.name;
+          state.currentUser.email = res.user.email;
+          syncUserProfileUI();
+        }
+        closeEditUserModal();
+        await loadBackendUsers();
+        toast(res.message || `Usuário "${name}" atualizado com sucesso!`);
+      } catch (apiErr) {
+        err.textContent = formatApiErrorMessage(apiErr, 'Não foi possível salvar as alterações.');
+        err.classList.remove('hidden');
+      } finally {
+        saveBtn.disabled = false;
+      }
+    });
+
+    // Modal Redefinir Senha do Usuário (Administrador)
+    $('#btnCloseResetUserPwd')?.addEventListener('click', closeResetUserPasswordModal);
+    $('#btnCancelResetUserPwd')?.addEventListener('click', closeResetUserPasswordModal);
+    $('#resetUserPasswordModal')?.addEventListener('click', (e) => {
+      if (e.target === $('#resetUserPasswordModal')) closeResetUserPasswordModal();
+    });
+
+    $('#btnToggleResetUserPwd')?.addEventListener('click', () => {
+      const inp = $('#resetUserPassword');
+      inp.type = inp.type === 'password' ? 'text' : 'password';
+    });
+
+    $('#btnToggleResetUserPwdConfirm')?.addEventListener('click', () => {
+      const inp = $('#resetUserPasswordConfirm');
+      inp.type = inp.type === 'password' ? 'text' : 'password';
+    });
+
+    $('#resetUserPassword')?.addEventListener('input', (e) => {
+      const val = e.target.value;
+      updatePasswordRulesUI('#resetUserPasswordRules', val, false);
+      const err = $('#resetUserPwdError');
+      if (err && !err.classList.contains('hidden') && evaluatePasswordStrength(val).valid) {
+        err.classList.add('hidden');
+      }
+    });
+
+    $('#btnSaveResetUserPwd')?.addEventListener('click', async () => {
+      const targetId = state.resetPwdUserId;
+      if (!targetId) return;
+
+      const password = $('#resetUserPassword').value;
+      const confirmPassword = $('#resetUserPasswordConfirm').value;
+      const err = $('#resetUserPwdError');
+
+      if (!evaluatePasswordStrength(password).valid) {
+        updatePasswordRulesUI('#resetUserPasswordRules', password, true);
+        err.textContent =
+          'A nova senha deve ter no mínimo 8 caracteres, contendo letra maiúscula, letra minúscula, número e caractere especial.';
+        err.classList.remove('hidden');
+        return;
+      }
+
+      if (password !== confirmPassword) {
+        err.textContent = 'A confirmação da senha não confere com a nova senha.';
+        err.classList.remove('hidden');
+        return;
+      }
+
+      err.classList.add('hidden');
+
+      if (!API?.getToken()) {
+        closeResetUserPasswordModal();
+        forceRedirectToLogin('Sua sessão expirou. Faça login novamente.');
+        return;
+      }
+
+      const saveBtn = $('#btnSaveResetUserPwd');
+      saveBtn.disabled = true;
+      try {
+        const res = await API.resetUserPassword(targetId, password);
+        closeResetUserPasswordModal();
+        toast(res.message || 'Senha redefinida com sucesso!');
+      } catch (apiErr) {
+        err.textContent = formatApiErrorMessage(apiErr, 'Não foi possível redefinir a senha.');
         err.classList.remove('hidden');
       } finally {
         saveBtn.disabled = false;
@@ -4804,6 +5164,8 @@
         closeManualModal();
         closeAccountModal();
         closeAddUserModal();
+        closeEditUserModal();
+        closeResetUserPasswordModal();
         closeDeleteUserModal();
         closeAboutModal();
         closeComposerActionModal();
@@ -4816,6 +5178,10 @@
         if (state.openConnMenuId !== null) {
           state.openConnMenuId = null;
           renderConnections();
+        }
+        if (state.openUserMenuId !== null) {
+          state.openUserMenuId = null;
+          renderUsers();
         }
         hideCanned();
         closeLgpdModal();

@@ -189,6 +189,20 @@
       });
     },
 
+    updateUser(userId, payload) {
+      return rawFetch(`/users/${userId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      });
+    },
+
+    resetUserPassword(userId, password) {
+      return rawFetch(`/users/${userId}/password`, {
+        method: 'PATCH',
+        body: JSON.stringify({ password }),
+      });
+    },
+
     updateUserRole(userId, role) {
       return rawFetch(`/users/${userId}/role`, {
         method: 'PATCH',

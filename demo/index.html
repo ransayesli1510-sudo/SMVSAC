@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=20261124-07" />
+  <link rel="stylesheet" href="styles.css?v=20261125-01" />
 </head>
 
 <body>
@@ -1072,6 +1072,9 @@
                 <option value="ADMIN">Administrador</option>
                 <option value="USER">User</option>
               </select>
+              <select id="usersDeptFilter" class="pill-filter-select" title="Filtrar por setor">
+                <option value="all">Setor: Todos</option>
+              </select>
               <button type="button" class="btn-contacts-refresh" id="btnUsersRefresh" title="Atualizar usuários"
                 aria-label="Atualizar lista de usuários">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
@@ -1085,17 +1088,18 @@
           </div>
 
           <div class="users-info-banner">
-            <span>🛡️ <strong>Administrador</strong> pode inserir e remover usuários e gerenciar todas as
-              conexões.</span>
+            <span>🛡️ <strong>Administrador</strong> pode inserir, editar, alocar em setores, redefinir senhas e remover
+              usuários.</span>
             <span>📱 <strong>User</strong> acessa o atendimento e pode conectar seu próprio WhatsApp via QR Code em
               <em>Conexões</em>.</span>
           </div>
 
-          <div class="clean-table-card">
+          <div class="clean-table-card users-table-card">
             <table class="clean-table">
               <thead>
                 <tr>
                   <th>Usuário</th>
+                  <th>Setor</th>
                   <th>Perfil</th>
                   <th>WhatsApp conectado</th>
                   <th>Status</th>
@@ -1134,6 +1138,17 @@
           <option value="ADMIN">Administrador — Insere/remove usuários e gerencia tudo</option>
         </select>
 
+        <label for="newUserDepartment">Setor</label>
+        <select id="newUserDepartment" class="field-select">
+          <option value="">Sem setor específico</option>
+          <option value="Admin/Financeiro">Admin/Financeiro</option>
+          <option value="Comercial">Comercial</option>
+          <option value="Marketing">Marketing</option>
+          <option value="Suporte">Suporte</option>
+          <option value="TI">TI</option>
+          <option value="Diretoria">Diretoria</option>
+        </select>
+
         <label for="newUserPassword">Senha inicial</label>
         <div class="password-wrap">
           <input type="password" id="newUserPassword" class="field-input" placeholder="Mínimo 8 caracteres"
@@ -1160,6 +1175,102 @@
       <div class="modal-foot">
         <button type="button" class="btn secondary pill" id="btnCancelAddUser">Cancelar</button>
         <button type="button" class="btn primary pill" id="btnSaveAddUser">Criar usuário</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== MODAL EDITAR USUÁRIO (APENAS ADMINISTRADOR) ========== -->
+  <div class="modal-backdrop hidden" id="editUserModal" role="dialog" aria-modal="true"
+    aria-labelledby="editUserModalTitle">
+    <div class="modal-card">
+      <div class="modal-head">
+        <div>
+          <h3 id="editUserModalTitle">Editar Usuário</h3>
+          <p class="modal-sub" id="editUserModalSub">Atualize os dados cadastrais, setor ou perfil de acesso do usuário.</p>
+        </div>
+        <button type="button" class="icon-btn" id="btnCloseEditUser" title="Fechar">×</button>
+      </div>
+      <div class="modal-body">
+        <label for="editUserName">Nome completo</label>
+        <input type="text" id="editUserName" class="field-input" placeholder="Ex: Maria Oliveira" required />
+
+        <label for="editUserEmail">E-mail de acesso</label>
+        <input type="email" id="editUserEmail" class="field-input" placeholder="maria@supermegavendas.com" required />
+        <p class="field-hint hidden" id="editUserEmailHint"></p>
+
+        <label for="editUserDepartment">Setor</label>
+        <select id="editUserDepartment" class="field-select">
+          <option value="">Sem setor específico</option>
+        </select>
+
+        <label for="editUserRole">Perfil de acesso</label>
+        <select id="editUserRole" class="field-select">
+          <option value="USER">User — Atende e conecta seu WhatsApp via QR Code</option>
+          <option value="ADMIN">Administrador — Insere/remove usuários e gerencia tudo</option>
+        </select>
+        <p class="field-hint hidden" id="editUserRoleHint"></p>
+
+        <div class="auth-error hidden" id="editUserError" style="margin-top:12px;margin-bottom:0;"></div>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn secondary pill" id="btnCancelEditUser">Cancelar</button>
+        <button type="button" class="btn primary pill" id="btnSaveEditUser">Salvar alterações</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== MODAL REDEFINIR SENHA DO USUÁRIO (APENAS ADMINISTRADOR) ========== -->
+  <div class="modal-backdrop hidden" id="resetUserPasswordModal" role="dialog" aria-modal="true"
+    aria-labelledby="resetUserPwdTitle">
+    <div class="modal-card">
+      <div class="modal-head">
+        <div>
+          <h3 id="resetUserPwdTitle">Redefinir Senha</h3>
+          <p class="modal-sub" id="resetUserPwdSubtitle">Defina uma nova senha de acesso para este usuário.</p>
+        </div>
+        <button type="button" class="icon-btn" id="btnCloseResetUserPwd" title="Fechar">×</button>
+      </div>
+      <div class="modal-body">
+        <label for="resetUserPassword">Nova senha</label>
+        <div class="password-wrap">
+          <input type="password" id="resetUserPassword" class="field-input" placeholder="Mínimo 8 caracteres"
+            autocomplete="new-password" minlength="8" required />
+          <button type="button" class="pwd-eye-btn" id="btnToggleResetUserPwd" title="Mostrar/ocultar senha"
+            aria-label="Mostrar ou ocultar senha">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+              <circle cx="12" cy="12" r="3" />
+            </svg>
+          </button>
+        </div>
+
+        <label for="resetUserPasswordConfirm">Confirmar nova senha</label>
+        <div class="password-wrap">
+          <input type="password" id="resetUserPasswordConfirm" class="field-input"
+            placeholder="Digite a nova senha novamente" autocomplete="new-password" minlength="8" required />
+          <button type="button" class="pwd-eye-btn" id="btnToggleResetUserPwdConfirm" title="Mostrar/ocultar senha"
+            aria-label="Mostrar ou ocultar confirmação da senha">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+              <circle cx="12" cy="12" r="3" />
+            </svg>
+          </button>
+        </div>
+
+        <ul class="pwd-rules-list" id="resetUserPasswordRules" aria-live="polite">
+          <li class="pwd-rule" data-rule="length"><span class="pwd-rule-icon">•</span> Mínimo de 8 caracteres</li>
+          <li class="pwd-rule" data-rule="upper"><span class="pwd-rule-icon">•</span> Letra maiúscula (A-Z)</li>
+          <li class="pwd-rule" data-rule="lower"><span class="pwd-rule-icon">•</span> Letra minúscula (a-z)</li>
+          <li class="pwd-rule" data-rule="number"><span class="pwd-rule-icon">•</span> Número (0-9)</li>
+          <li class="pwd-rule" data-rule="special"><span class="pwd-rule-icon">•</span> Caractere especial (!@#$%...)
+          </li>
+        </ul>
+
+        <div class="auth-error hidden" id="resetUserPwdError" style="margin-top:12px;margin-bottom:0;"></div>
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn secondary pill" id="btnCancelResetUserPwd">Cancelar</button>
+        <button type="button" class="btn primary pill" id="btnSaveResetUserPwd">Redefinir senha</button>
       </div>
     </div>
   </div>
@@ -1764,9 +1875,9 @@
   <div class="toast-stack" id="toastStack"></div>
 
   <script src="config.js?v=20261124-08"></script>
-  <script src="api.js?v=20261124-07"></script>
+  <script src="api.js?v=20261125-01"></script>
   <script src="data.js?v=20261124-07"></script>
-  <script src="app.js?v=20261124-07"></script>
+  <script src="app.js?v=20261125-01"></script>
 </body>
 
 </html>
